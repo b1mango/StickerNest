@@ -102,7 +102,7 @@ fn validate_animation(frames: image::Frames<'_>) -> Result<(), String> {
         if index >= MAX_ANIMATION_FRAMES {
             return Err("动画超过本工具的 1000 帧限制".into());
         }
-        let frame = frame.map_err(|e| format!("GIF 动画损坏：{e}"))?;
+        let frame = frame.map_err(|e| format!("动画损坏：{e}"))?;
         pixels += u64::from(frame.buffer().width()) * u64::from(frame.buffer().height());
         if pixels > MAX_ANIMATION_PIXELS {
             return Err("动画超过本工具的累计 1 亿解码像素限制".into());
@@ -124,13 +124,7 @@ fn inspect(bytes: &[u8]) -> Result<(String, u32, u32), String> {
         image::ImageFormat::Png => {
             let decoder = image::codecs::png::PngDecoder::new(Cursor::new(bytes)).map_err(err)?;
             if decoder.is_apng().map_err(err)? {
-                return Err("第一版暂不支持 APNG 动画，请导入 GIF 动画或静态 PNG".into());
-            }
-        }
-        image::ImageFormat::WebP => {
-            let decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).map_err(err)?;
-            if decoder.has_animation() {
-                return Err("第一版暂不支持动画 WebP，请导入 GIF 动画或静态 WebP".into());
+                return Err("暂不支持 APNG 动画，请导入 GIF、动画 WebP 或静态 PNG".into());
             }
         }
         _ => (),
@@ -153,6 +147,17 @@ fn inspect(bytes: &[u8]) -> Result<(String, u32, u32), String> {
         decoder.set_limits(limits).map_err(err)?;
         // Stream validation, retaining only one decoded frame at a time.
         validate_animation(decoder.into_frames())?;
+    }
+    if format == image::ImageFormat::WebP {
+        let mut decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).map_err(err)?;
+        if decoder.has_animation() {
+            let mut limits = image::Limits::default();
+            limits.max_image_width = Some(MAX_DIMENSION);
+            limits.max_image_height = Some(MAX_DIMENSION);
+            limits.max_alloc = Some(128 * 1024 * 1024);
+            decoder.set_limits(limits).map_err(err)?;
+            validate_animation(decoder.into_frames())?;
+        }
     }
     Ok((extension.into(), decoded.width(), decoded.height()))
 }
@@ -384,6 +389,102 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Build a tiny animation from our own lossless frames, with no user assets.
+    fn animated_webp() -> Vec<u8> {
+        fn chunk(target: &mut Vec<u8>, name: &[u8; 4], data: &[u8]) {
+            target.extend_from_slice(name);
+            target.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            target.extend_from_slice(data);
+            if data.len() % 2 != 0 {
+                target.push(0);
+            }
+        }
+        let mut body = b"WEBP".to_vec();
+        // Animation flag, 2×3 canvas (stored as width/height minus one).
+        chunk(&mut body, b"VP8X", &[2, 0, 0, 0, 1, 0, 0, 2, 0, 0]);
+        chunk(&mut body, b"ANIM", &[0; 6]);
+        for color in [[255, 0, 0, 255], [0, 0, 255, 255]] {
+            let mut encoded = Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(2, 3, image::Rgba(color)))
+                .write_to(&mut encoded, image::ImageFormat::WebP)
+                .unwrap();
+            // Full-canvas, 100 ms frame, replace rather than blend.
+            let mut frame = vec![0, 0, 0, 0, 0, 0, 1, 0, 0, 2, 0, 0, 100, 0, 0, 2];
+            frame.extend_from_slice(&encoded.into_inner()[12..]);
+            chunk(&mut body, b"ANMF", &frame);
+        }
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend(body);
+        bytes
+    }
+
+    #[test]
+    fn animated_webp_preserves_all_frames_bytes_and_deduplicates() {
+        let bytes = animated_webp();
+        let frames = image::codecs::webp::WebPDecoder::new(Cursor::new(&bytes))
+            .unwrap()
+            .into_frames()
+            .collect_frames()
+            .unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].buffer().get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(frames[1].buffer().get_pixel(0, 0).0, [0, 0, 255, 255]);
+        assert_eq!(frames[1].delay().numer_denom_ms(), (100, 1));
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("animation.webp");
+        fs::write(&source, &bytes).unwrap();
+        let mut library = Library::create(dir.path()).unwrap();
+        let report = library
+            .import_files(vec![source.clone()], "抖音".into())
+            .unwrap();
+        assert_eq!(report.added, 1);
+        assert!(report.failed.is_empty());
+        let report = library
+            .import_files(vec![source.clone()], "本地".into())
+            .unwrap();
+        assert_eq!((report.added, report.duplicates), (0, 1));
+        let item = &library.snapshot().items[0];
+        assert_eq!(
+            (item.format.as_str(), item.width, item.height),
+            ("webp", 2, 3)
+        );
+        assert_eq!(item.sources, ["抖音", "本地"]);
+        assert_eq!(
+            fs::read(library.asset_path(&item.id).unwrap()).unwrap(),
+            bytes
+        );
+        assert_eq!(fs::read(source).unwrap(), bytes);
+        let root = library.root.clone();
+        drop(library);
+        assert_eq!(Library::open(&root).unwrap().snapshot().items.len(), 1);
+    }
+
+    #[test]
+    fn animated_webp_with_damaged_later_frame_is_not_imported() {
+        let mut bytes = animated_webp();
+        let second_payload = bytes.windows(4).rposition(|part| part == b"VP8L").unwrap() + 8;
+        bytes[second_payload] = 0; // Break the second frame's lossless signature only.
+        let mut frames = image::codecs::webp::WebPDecoder::new(Cursor::new(&bytes))
+            .unwrap()
+            .into_frames();
+        assert!(frames.next().unwrap().is_ok());
+        assert!(frames.next().unwrap().is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("damaged.webp");
+        fs::write(&source, &bytes).unwrap();
+        let mut library = Library::create(dir.path()).unwrap();
+        let report = library.import_files(vec![source], "抖音".into()).unwrap();
+        assert_eq!(report.added, 0);
+        assert_eq!(report.failed.len(), 1);
+        assert!(report.failed[0].error.contains("动画损坏"));
+        assert!(library.snapshot().items.is_empty());
+        assert_eq!(
+            fs::read_dir(library.root.join("assets")).unwrap().count(),
+            0
+        );
+    }
     fn fixture(path: &Path) -> Vec<u8> {
         let mut encoded = Cursor::new(Vec::new());
         image::DynamicImage::new_rgba8(2, 3)
