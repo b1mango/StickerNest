@@ -1,0 +1,10 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+output/
+.playwright-cli/
+.DS_Store
+*.local
+.env*
+!.env.example
