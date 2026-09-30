@@ -2,6 +2,7 @@
 name = "stickernest"
 version = "0.1.0"
 edition = "2021"
+default-run = "stickernest"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

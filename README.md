@@ -40,3 +40,28 @@ npm run build
 ```
 
 见[项目设计](项目设计.md)、[项目进度](项目进度.md)、[对话记录](对话记录.md)。原生小样本创建、导入、预览、GIF播放及切库重开已通过；完整进程重启和实际1500素材规模尚待验收。抖音网页590项收藏清单与静态/动画小样本已验证；微信候选缓存尚未解码，自动采集功能未实现。
+
+## 抖音本地采集辅助工具
+
+先通过本人已登录网页的收藏面板取得并核验清单；当前不会自动连接浏览器，也不提供官方收藏API。输入为包含 `id_str`、`hash`、`animate_url/static_url`（`uri`、`url_list`）的本地JSON数组。签名地址有时效，清单仅保存在忽略的 `output/` 下。
+
+需要 Python 3 和 Pillow。下载原件与逐项报告：
+
+```sh
+python3 scripts/download_douyin.py output/web-probe/verified-stickers.json output/douyin-export
+```
+
+资源保存在 `originals/`，结果为 `report.json`。相同命令可恢复：先检查资源身份和本地哈希，已保存的资源不重复下载。地址过期需重新获取清单；不自动登录或提取Cookie。仅允许当前验证过的两个表情CDN域名，出现新域名需审查后更新。图片校验失败仍保留原件并标为待核验；下载超过20MiB直接拒绝。报告的收藏条目数、成功资源数、内容去重数分别计算。
+
+新建独立资料库并导入（父目录需先存在）：
+
+```sh
+mkdir -p output/douyin-library
+cargo run --offline --manifest-path src-tauri/Cargo.toml --bin import-local -- \
+  --input output/douyin-export/originals --library output/douyin-library \
+  --create --source 抖音 > output/douyin-export/import-report.json
+```
+
+已有库省略 `--create`，`--library` 指向 `StickerNest Library` 本身。输入目录只放资源文件，不递归，拒绝链接、子目录及未知扩展名；原始内容仍由Rust校验。部分素材失败不会回滚已成功入库项，退出码2并列出失败文件；其他错误退出码1。可在桌面应用“打开资料库”中选取新库。不要在桌面和命令行同时打开同一库。
+
+辅助工具测试：`python3 -m unittest discover -s tests -v` 与 `cargo test --offline --manifest-path src-tauri/Cargo.toml --bin import-local`。
