@@ -53,7 +53,7 @@ export function StickerDetail({ item, root, metadata, editable, onSave, onClose 
           <label className="field-label">名称<input value={name} maxLength={200} required disabled={saving} onChange={event => setName(event.target.value)} /></label>
           <label className="field-label">标签<input value={tags} disabled={saving} placeholder="例如：开心，猫咪" onChange={event => setTags(event.target.value)} /></label>
           <label className="field-label">合集<input value={collections} disabled={saving} placeholder="例如：日常回复，工作群" onChange={event => setCollections(event.target.value)} /></label>
-          <p className="field-hint">多个标签或合集用逗号分隔。修改名称不会改变原文件。</p>
+          <p className="field-hint">多个标签或合集用逗号分隔。</p>
           {error ? <p className="field-error" role="alert">{error}</p> : null}
           <div className="editor-actions"><button className="button primary" disabled={saving || !name.trim()} type="submit">{saving ? '正在保存…' : '保存整理'}</button><button className="button secondary" type="button" disabled={saving} onClick={cancelEditing}>取消</button></div>
         </form> : <div className="detail-organization"><p>标签：{metadata?.tags.join('、') || '未添加'}</p><p>合集：{metadata?.collections.join('、') || '未加入'}</p><button className="text-button" disabled={!editable} onClick={startEditing}>编辑名称、标签与合集</button></div>}
