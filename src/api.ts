@@ -26,3 +26,17 @@ export async function importImages(source: string): Promise<{ snapshot: Snapshot
 export function imageUrl(root: string, fileName: string): string {
   return convertFileSrc(`${root}/assets/${fileName}`);
 }
+
+export async function getManagement(): Promise<import('./types').ManagementSnapshot> {
+  return invoke('get_management');
+}
+
+export async function saveMetadata(expectedRoot: string, assetId: string, metadata: import('./types').AssetMetadata): Promise<import('./types').ManagementSnapshot> {
+  return invoke('save_metadata', { expectedRoot, assetId, ...metadata });
+}
+
+export async function importProvenance(expectedRoot: string, accountAlias: string, accountId: string | null): Promise<import('./types').ManagementSnapshot | null> {
+  const path = await open({ multiple: false, directory: false, title: '选择抖音本地采集报告', filters: [{ name: '采集报告', extensions: ['json'] }] });
+  if (!path) return null;
+  return invoke('import_provenance', { expectedRoot, path, accountAlias, accountId });
+}

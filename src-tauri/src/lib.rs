@@ -1,4 +1,6 @@
 pub mod library;
+pub mod management;
+use management::ManagementSnapshot;
 
 use library::{ImportReport, Library, LibrarySnapshot};
 use serde::Serialize;
@@ -102,6 +104,46 @@ async fn import_images(
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+fn get_management(state: State<'_, LibraryState>) -> Result<ManagementSnapshot, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    current.as_ref().ok_or("请先打开资料库")?.get_management()
+}
+#[tauri::command]
+fn save_metadata(
+    state: State<'_, LibraryState>,
+    expected_root: String,
+    asset_id: String,
+    name: String,
+    tags: Vec<String>,
+    collections: Vec<String>,
+) -> Result<ManagementSnapshot, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    current.as_ref().ok_or("请先打开资料库")?.save_metadata(
+        &expected_root,
+        asset_id,
+        name,
+        tags,
+        collections,
+    )
+}
+#[tauri::command]
+fn import_provenance(
+    state: State<'_, LibraryState>,
+    expected_root: String,
+    path: String,
+    account_alias: String,
+    account_id: Option<String>,
+) -> Result<ManagementSnapshot, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    current.as_ref().ok_or("请先打开资料库")?.import_provenance(
+        &expected_root,
+        &PathBuf::from(path),
+        account_alias,
+        account_id,
+    )
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -109,7 +151,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             select_library,
             current_library,
-            import_images
+            import_images,
+            get_management,
+            save_metadata,
+            import_provenance
         ])
         .run(tauri::generate_context!())
         .expect("无法启动拾趣桌面应用");

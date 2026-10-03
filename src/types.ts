@@ -32,3 +32,17 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+export interface AssetMetadata {
+  name: string;
+  tags: string[];
+  collections: string[];
+}
+
+export interface ManagementSnapshot {
+  version: number;
+  metadata: Record<string, AssetMetadata>;
+  accounts: { id: string; platform: string; alias: string }[];
+  batches: { id: string; accountId: string; collectionItems: number; mappedResources: number; failedResources: number }[];
+  references: { accountId: string; stickerId: string; assetId: string; resourceIdentity: string }[];
+}

@@ -157,3 +157,27 @@ h1 { display: flex; align-items: center; gap: 16px; font-size: 28px; font-weight
   .detail-preview { height: 220px; }
 }
 @media (prefers-reduced-motion: reduce) { .spin { animation: none; } button:active:not(:disabled) { transform: none; } }
+/* Management components share the library's paper surfaces and forest controls. */
+.management-filters { display: flex; gap: 20px; flex-wrap: wrap; padding-top: 16px; }
+.management-panel { border-bottom: 1px solid var(--rule); padding: 4px 0 16px; font-size: 12px; }
+.management-panel > summary { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; min-height: 44px; cursor: pointer; color: var(--forest); font-weight: 550; }
+.management-panel > summary::before { content: '+'; font-size: 18px; }
+.management-panel[open] > summary::before { content: '−'; }
+.management-panel > summary > span { color: var(--ink-secondary); font-size: 11px; font-weight: 400; }
+.management-panel > p, .field-hint { color: var(--ink-secondary); font-size: 11px; line-height: 1.8; }
+.management-import { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin: 16px 0; }
+.field-label { display: grid; gap: 8px; color: var(--ink-secondary); font-size: 12px; min-width: 0; }
+.field-label input, .field-label select { min-height: 44px; min-width: 0; width: 100%; color: var(--ink); background: var(--paper-inset); border: 1px solid var(--rule); border-radius: var(--radius-control); padding: 10px 12px; }
+.management-import .field-label { flex: 1 1 180px; max-width: 260px; }
+.metadata-editor { display: grid; gap: 16px; margin-top: 20px; }
+.editor-actions { display: flex; gap: 8px; }
+.field-error { color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+.detail-organization { margin-top: 16px; font-size: 12px; color: var(--ink-secondary); line-height: 1.8; overflow-wrap: anywhere; }
+.detail-organization .text-button { color: var(--forest); padding: 0; }
+
+.batch-completeness { display: grid; gap: 12px; margin-top: 16px; color: var(--ink-secondary); line-height: 1.8; }
+.batch-completeness > strong { color: var(--ink); font-weight: 550; }
+.batch-row { padding: 12px; background: var(--paper-inset); border-radius: var(--radius-control); overflow-wrap: anywhere; }
+.batch-row > b { color: var(--ink); font-weight: 550; }
+.batch-row > p:last-child { font-size: 11px; }
+.batch-row.incomplete { background: var(--warning-wash); color: var(--warning); }
