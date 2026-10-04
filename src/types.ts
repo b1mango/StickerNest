@@ -45,4 +45,12 @@ export interface ManagementSnapshot {
   accounts: { id: string; platform: string; alias: string }[];
   batches: { id: string; accountId: string; collectionItems: number; mappedResources: number; failedResources: number }[];
   references: { accountId: string; stickerId: string; assetId: string; resourceIdentity: string }[];
+  trash: Record<string, number>;
+}
+
+export interface BackupSummary {
+  path: string;
+  assetCount: number;
+  totalBytes: number;
+  includesManagement: boolean;
 }

@@ -20,6 +20,14 @@ export function ManagementPanel({ management, busy, onImport }: {
     }
     return { entries: entries.size, assets: assets.size, shared: [...assets.values()].filter(group => group.size > 1).length };
   }, [management]);
+  const restorable = useMemo(() => {
+    const trashed = new Set(Object.keys(management.trash));
+    const keys = new Set<string>();
+    for (const reference of management.references) {
+      if (trashed.has(reference.assetId)) keys.add(`${reference.accountId}:${reference.stickerId}`);
+    }
+    return keys.size;
+  }, [management]);
   const recentBatches = useMemo(() => {
     const latest = new Map<string, ManagementSnapshot['batches'][number]>();
     for (const batch of management.batches) latest.set(batch.accountId, batch);
@@ -33,6 +41,7 @@ export function ManagementPanel({ management, busy, onImport }: {
   return <details className="management-panel">
     <summary>来源与精确去重 <span>{stats.entries} 项收藏 · {stats.assets} 个素材 · {stats.shared} 组共用文件</span></summary>
     <p>仅统计导入报告；相同文件只存一份。</p>
+    {restorable ? <p>{restorable} 项收藏对应的素材在回收站中，可在回收站恢复。</p> : null}
     {recentBatches.length ? <div className="batch-completeness" aria-label="各账号最近记录批次完整性"><strong>最近导入</strong>{recentBatches.map(batch => {
       const unprocessed = batch.collectionItems - batch.mappedResources - batch.failedResources;
       const incomplete = batch.failedResources > 0 || unprocessed > 0;

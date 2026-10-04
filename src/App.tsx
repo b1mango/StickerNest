@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, ArrowDownToLine, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Folder, FolderOpen, FolderPlus, HardDrive, Images, LoaderCircle, MessageCircle, Music2, Search, Smile, X } from 'lucide-react';
-import { chooseLibrary, currentLibrary, imageUrl, importImages, isDesktop, getManagement, saveMetadata, importProvenance } from './api';
+import { Archive, ArchiveRestore, ArrowDownToLine, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Folder, FolderOpen, FolderPlus, HardDrive, HardDriveDownload, Images, LoaderCircle, MessageCircle, Music2, Search, Smile, Trash2, X } from 'lucide-react';
+import { chooseLibrary, currentLibrary, imageUrl, importImages, isDesktop, getManagement, saveMetadata, importProvenance, setTrash, backupLibrary, restoreBackup, openLibraryPath } from './api';
 import { SOURCE_LABELS, formatBytes, type ImportReport, type Snapshot, type Sticker, type ManagementSnapshot, type AssetMetadata } from './types';
 import { StickerDetail } from './components/StickerDetail';
 import { StickerPreview } from './components/StickerPreview';
@@ -13,6 +13,7 @@ const navigation = [
   { id: '微信', label: '微信', icon: MessageCircle },
   { id: '抖音', label: '抖音', icon: Music2 },
   { id: '本地', label: '本地文件', icon: Folder },
+  { id: 'trash', label: '回收站', icon: Trash2 },
 ];
 
 export default function App() {
@@ -30,6 +31,7 @@ export default function App() {
   const [error, setError] = useState('');
   const [previewWarning, setPreviewWarning] = useState('');
   const [report, setReport] = useState<ImportReport | null>(null);
+  const [backupNotice, setBackupNotice] = useState<{ text: string; path: string } | null>(null);
   const [selected, setSelected] = useState<Sticker | null>(null);
   const locked = useRef(false);
 
@@ -60,14 +62,40 @@ export default function App() {
     finally { locked.current = false; setBusy(''); }
   }
 
+  async function applyLibrary(snapshot: Snapshot) {
+    setLibrary(snapshot); setManagementNotice(''); setManagement(null); setManagementError(''); setTag(''); setCollection(''); setReport(null); setSelected(null); setQuery(''); setSource('all'); setPage(1); setBackupNotice(null);
+    try { setManagement(await getManagement()); } catch (reason) { setManagementError(String(reason)); }
+  }
+
   function openLibrary(create: boolean) {
     void run(create ? '正在创建资料库' : '正在打开资料库', async () => {
       const snapshot = await chooseLibrary(create);
-      if (snapshot) {
-        setLibrary(snapshot); setManagementNotice(''); setManagement(null); setManagementError(''); setTag(''); setCollection(''); setReport(null); setSelected(null); setQuery(''); setSource('all'); setPage(1);
-        try { setManagement(await getManagement()); } catch (reason) { setManagementError(String(reason)); }
+      if (snapshot) await applyLibrary(snapshot);
+    });
+  }
+
+  function backupCurrentLibrary() {
+    void run('正在备份资料库', async () => {
+      const result = await backupLibrary();
+      if (result) setBackupNotice({ text: `已备份 ${result.assetCount} 个素材（${formatBytes(result.totalBytes)}${result.includesManagement ? '，含整理记录' : ''}），哈希校验通过。`, path: result.path });
+    });
+  }
+
+  function restoreFromBackup() {
+    void run('正在校验并恢复备份', async () => {
+      const path = await restoreBackup();
+      if (path) {
+        await applyLibrary(await openLibraryPath(path));
+        setBackupNotice({ text: '已从备份恢复并在新位置打开，原备份保持不变。', path });
       }
     });
+  }
+
+  async function setItemsTrash(ids: string[], trashed: boolean) {
+    // Like editMetadata, the modal blocks library switching while this save is pending.
+    if (!library) throw new Error('请先打开资料库。');
+    setManagement(await setTrash(library.root, ids, trashed));
+    setSelected(null);
   }
 
   function importFiles() {
@@ -80,11 +108,16 @@ export default function App() {
     });
   }
 
+  const trashSet = useMemo(() => new Set(Object.keys(management?.trash ?? {})), [management]);
   const counts = useMemo(() => {
-    const values: Record<string, number> = { all: library?.items.length ?? 0, 本地: 0, 微信: 0, 抖音: 0 };
-    for (const item of library?.items ?? []) for (const origin of item.sources) values[origin] = (values[origin] ?? 0) + 1;
+    const values: Record<string, number> = { all: 0, 本地: 0, 微信: 0, 抖音: 0, trash: 0 };
+    for (const item of library?.items ?? []) {
+      if (trashSet.has(item.id)) { values.trash += 1; continue; }
+      values.all += 1;
+      for (const origin of item.sources) values[origin] = (values[origin] ?? 0) + 1;
+    }
     return values;
-  }, [library]);
+  }, [library, trashSet]);
   const displayItems = useMemo(() => (library?.items ?? []).map(item => ({ ...item, name: management?.metadata[item.id]?.name || item.name })), [library, management]);
   const facets = useMemo(() => {
     const tags = new Set<string>();
@@ -99,11 +132,15 @@ export default function App() {
     const search = query.trim().toLocaleLowerCase();
     return displayItems.filter(item => {
       const meta = management?.metadata[item.id];
-      return (source === 'all' || item.sources.includes(source))
-        && (!tag || meta?.tags.includes(tag)) && (!collection || meta?.collections.includes(collection))
+      if (source === 'trash') {
+        if (!trashSet.has(item.id)) return false;
+      } else if (trashSet.has(item.id) || (source !== 'all' && !item.sources.includes(source))) {
+        return false;
+      }
+      return (!tag || meta?.tags.includes(tag)) && (!collection || meta?.collections.includes(collection))
         && (!search || [item.name, ...(meta?.tags ?? [])].some(value => value.toLocaleLowerCase().includes(search)));
     });
-  }, [displayItems, management, query, source, tag, collection]);
+  }, [displayItems, management, query, source, tag, collection, trashSet]);
   async function editMetadata(assetId: string, metadata: AssetMetadata) {
     // The modal prevents switching libraries while its save is pending.
     if (!library) throw new Error('请先打开资料库。');
@@ -121,6 +158,10 @@ export default function App() {
   const visible = filtered.slice((visiblePage - 1) * PAGE_SIZE, visiblePage * PAGE_SIZE);
   const disabled = !!busy || !isDesktop;
   const heading = navigation.find(item => item.id === source)?.label ?? '全部表情';
+  const isFiltering = !!(query || tag || collection) || (source !== 'all' && source !== 'trash');
+  const inEmptyTrash = source === 'trash' && !isFiltering;
+  const emptyTitle = inEmptyTrash ? '回收站是空的' : isFiltering ? '没有匹配的表情' : '还没有表情';
+  const emptyHint = inEmptyTrash ? '移入回收站的素材会保留在这里，可随时恢复。' : isFiltering ? '试试其他关键词或筛选。' : '导入本地图片或动图。';
 
   return (
     <div className="app-shell">
@@ -131,7 +172,11 @@ export default function App() {
         <div className="sidebar-bottom">
           <div className="local-indicator"><HardDrive size={16} /><span>本地存储</span><span className="status-dot" /></div>
           <button className="button secondary full-width" disabled={disabled} onClick={() => openLibrary(false)}><FolderOpen size={16} />打开资料库</button>
-          {library ? <button className="text-button full-width" disabled={disabled} onClick={() => openLibrary(true)}>新建资料库</button> : null}
+          {library ? <button className="button secondary full-width" disabled={disabled} onClick={backupCurrentLibrary}><HardDriveDownload size={16} />备份资料库</button> : null}
+          <div className="sidebar-links">
+            {library ? <button className="text-button" disabled={disabled} onClick={() => openLibrary(true)}>新建资料库</button> : null}
+            <button className="text-button" disabled={disabled} onClick={restoreFromBackup}><ArchiveRestore size={15} />从备份恢复</button>
+          </div>
         </div>
       </aside>
 
@@ -144,17 +189,18 @@ export default function App() {
 
         {library && management ? <><div className="management-filters"><label className="source-select">标签<select value={tag} onChange={event => { setTag(event.target.value); setPage(1); }}><option value="">全部标签</option>{facets.tags.map(value => <option key={value}>{value}</option>)}</select></label><label className="source-select">合集<select value={collection} onChange={event => { setCollection(event.target.value); setPage(1); }}><option value="">全部合集</option>{facets.collections.map(value => <option key={value}>{value}</option>)}</select></label></div><ManagementPanel key={library.root} management={management} busy={disabled} onImport={importSourceReport} /></> : null}
         {managementNotice ? <div className="notice success" role="status"><p>{managementNotice}</p><button className="icon-button" aria-label="关闭来源导入结果" onClick={() => setManagementNotice('')}><X size={17} /></button></div> : null}
+        {backupNotice ? <div className="notice success" role="status"><CheckCircle2 size={18} /><div><strong>{backupNotice.text}</strong><p className="notice-path" title={backupNotice.path}>{backupNotice.path}</p></div><button className="icon-button" aria-label="关闭备份结果" onClick={() => setBackupNotice(null)}><X size={17} /></button></div> : null}
         {managementError ? <div className="notice error" role="alert"><div><strong>整理记录未能读取</strong><p>{managementError}</p><p>编辑已停用，原记录保留；修复整理文件后重开资料库。</p></div></div> : null}
         {!isDesktop ? <div className="notice"><CircleAlert size={18} /><p>请使用桌面应用打开本地资料库。</p></div> : null}
         {busy ? <div className="notice" role="status"><LoaderCircle className="spin" size={18} /><p>{busy}…</p></div> : null}
         {error ? <div className="notice error" role="alert"><CircleAlert size={18} /><div><strong>操作未完成</strong><p>{error}</p><p>检查文件或权限后重试。</p></div><button className="icon-button" aria-label="关闭错误提示" onClick={() => setError('')}><X size={17} /></button></div> : null}
         {previewWarning ? <div className="notice warning" role="status"><CircleAlert size={18} /><div><strong>预览提示</strong><p>{previewWarning}</p><p>请检查原文件是否仍在。</p></div><button className="icon-button" aria-label="关闭预览提示" onClick={() => setPreviewWarning('')}><X size={17} /></button></div> : null}
-        {report ? <div className={`notice import-report ${report.failed.length ? 'warning' : 'success'}`} role="status"><CheckCircle2 size={18} /><div><strong>导入完成</strong><p>新增 {report.added} 个 · 重复 {report.duplicates} 个 · 失败 {report.failed.length} 个</p>{report.failed.length ? <details><summary>查看失败文件</summary><ul>{report.failed.map((failure, index) => <li key={`${index}-${failure.name}`}><b>{failure.name}</b>：{failure.error}</li>)}</ul><p>修复后重新导入，已入库项会自动去重。</p></details> : null}</div><button className="icon-button" aria-label="关闭导入结果" onClick={() => setReport(null)}><X size={17} /></button></div> : null}
+        {report ? <div className={`notice import-report ${report.failed.length ? 'warning' : 'success'}`} role="status"><CheckCircle2 size={18} /><div><strong>导入完成</strong><p>新增 {report.added} 个 · 重复 {report.duplicates} 个 · 失败 {report.failed.length} 个</p>{report.duplicates > 0 && trashSet.size > 0 ? <p>重复项未显示时，可能在回收站中。</p> : null}{report.failed.length ? <details><summary>查看失败文件</summary><ul>{report.failed.map((failure, index) => <li key={`${index}-${failure.name}`}><b>{failure.name}</b>：{failure.error}</li>)}</ul><p>修复后重新导入，已入库项会自动去重。</p></details> : null}</div><button className="icon-button" aria-label="关闭导入结果" onClick={() => setReport(null)}><X size={17} /></button></div> : null}
 
-        {!library ? <section className="empty-state welcome"><span className="empty-icon"><Archive size={38} strokeWidth={1.4} /></span><h2>打开你的表情库</h2><p>新建或打开一个本地文件夹。</p><div className="empty-actions"><button className="button primary" disabled={disabled} onClick={() => openLibrary(true)}><FolderPlus size={18} />新建资料库</button><button className="button secondary" disabled={disabled} onClick={() => openLibrary(false)}><FolderOpen size={18} />打开已有资料库</button></div></section> : visible.length === 0 ? <section className="empty-state"><span className="empty-icon"><Images size={36} strokeWidth={1.4} /></span><h2>{query || tag || collection || source !== 'all' ? '没有匹配的表情' : '还没有表情'}</h2><p>{query || tag || collection || source !== 'all' ? '试试其他关键词或筛选。' : '导入本地图片或动图。'}</p>{query || tag || collection || source !== 'all' ? <button className="button secondary" onClick={() => { setQuery(''); setTag(''); setCollection(''); setSource('all'); setPage(1); }}>查看全部表情</button> : <button className="button primary" disabled={disabled} onClick={importFiles}><ArrowDownToLine size={18} />导入表情</button>}</section> : <><div className="collection-caption"><span>{query ? `找到 ${filtered.length} 个表情` : `共 ${filtered.length} 个表情`}</span></div><section className="sticker-grid" aria-label="表情列表">{visible.map(item => <button className="sticker-card" key={item.id} onClick={() => setSelected(library.items.find(original => original.id === item.id) ?? item)} aria-label={`查看 ${item.name}`}><div className="sticker-image"><StickerPreview key={`${library.root}/${item.fileName}`} src={imageUrl(library.root, item.fileName)} name={item.name} /><span className="format-badge">{item.format.toUpperCase()}</span></div><div className="sticker-info"><strong title={item.name}>{item.name}</strong><span>{item.sources.map(origin => SOURCE_LABELS[origin] ?? origin).join(' / ')}<span>{formatBytes(item.bytes)}</span></span></div></button>)}</section><div className="pagination"><span>第 {visiblePage} / {totalPages} 页</span><button className="icon-button" aria-label="上一页" disabled={visiblePage === 1} onClick={() => setPage(visiblePage - 1)}><ChevronLeft size={20} /></button><button className="icon-button" aria-label="下一页" disabled={visiblePage === totalPages} onClick={() => setPage(visiblePage + 1)}><ChevronRight size={20} /></button></div></>}
+        {!library ? <section className="empty-state welcome"><span className="empty-icon"><Archive size={38} strokeWidth={1.4} /></span><h2>打开你的表情库</h2><p>新建或打开一个本地文件夹。</p><div className="empty-actions"><button className="button primary" disabled={disabled} onClick={() => openLibrary(true)}><FolderPlus size={18} />新建资料库</button><button className="button secondary" disabled={disabled} onClick={() => openLibrary(false)}><FolderOpen size={18} />打开已有资料库</button></div></section> : visible.length === 0 ? <section className="empty-state"><span className="empty-icon">{inEmptyTrash ? <Trash2 size={36} strokeWidth={1.4} /> : <Images size={36} strokeWidth={1.4} />}</span><h2>{emptyTitle}</h2><p>{emptyHint}</p>{isFiltering ? <button className="button secondary" onClick={() => { setQuery(''); setTag(''); setCollection(''); setSource('all'); setPage(1); }}>查看全部表情</button> : source === 'trash' ? null : <button className="button primary" disabled={disabled} onClick={importFiles}><ArrowDownToLine size={18} />导入表情</button>}</section> : <><div className="collection-caption"><span>{query ? `找到 ${filtered.length} 个表情` : `共 ${filtered.length} 个表情`}</span></div><section className="sticker-grid" aria-label="表情列表">{visible.map(item => <button className="sticker-card" key={item.id} onClick={() => setSelected(library.items.find(original => original.id === item.id) ?? item)} aria-label={`查看 ${item.name}`}><div className="sticker-image"><StickerPreview key={`${library.root}/${item.fileName}`} src={imageUrl(library.root, item.fileName)} name={item.name} /><span className="format-badge">{item.format.toUpperCase()}</span></div><div className="sticker-info"><strong title={item.name}>{item.name}</strong><span>{item.sources.map(origin => SOURCE_LABELS[origin] ?? origin).join(' / ')}<span>{formatBytes(item.bytes)}</span></span></div></button>)}</section><div className="pagination"><span>第 {visiblePage} / {totalPages} 页</span><button className="icon-button" aria-label="上一页" disabled={visiblePage === 1} onClick={() => setPage(visiblePage - 1)}><ChevronLeft size={20} /></button><button className="icon-button" aria-label="下一页" disabled={visiblePage === totalPages} onClick={() => setPage(visiblePage + 1)}><ChevronRight size={20} /></button></div></>}
         <footer className="library-footer"><Folder size={14} /><span title={library?.root}>{library?.root ?? '尚未选择资料库'}</span><span className="footer-count">{library ? `${library.items.length} 个原始素材` : '本地资料库'}</span></footer>
       </main>
-      {selected && library ? <StickerDetail key={selected.id} item={selected} root={library.root} metadata={management?.metadata[selected.id]} editable={!!management && !disabled} onSave={metadata => editMetadata(selected.id, metadata)} onClose={() => setSelected(null)} /> : null}
+      {selected && library ? <StickerDetail key={selected.id} item={selected} root={library.root} metadata={management?.metadata[selected.id]} editable={!!management && !disabled} trashed={!!management?.trash[selected.id]} trashedAt={management?.trash[selected.id]} onSave={metadata => editMetadata(selected.id, metadata)} onSetTrash={value => setItemsTrash([selected.id], value)} onClose={() => setSelected(null)} /> : null}
     </div>
   );
 }

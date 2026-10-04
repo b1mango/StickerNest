@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import type { Snapshot, ImportReport } from './types';
+import type { BackupSummary, Snapshot, ImportReport } from './types';
 
 export const isDesktop = isTauri();
 
@@ -39,4 +39,26 @@ export async function importProvenance(expectedRoot: string, accountAlias: strin
   const path = await open({ multiple: false, directory: false, title: '选择抖音本地采集报告', filters: [{ name: '采集报告', extensions: ['json'] }] });
   if (!path) return null;
   return invoke('import_provenance', { expectedRoot, path, accountAlias, accountId });
+}
+
+export async function setTrash(expectedRoot: string, assetIds: string[], trashed: boolean): Promise<import('./types').ManagementSnapshot> {
+  return invoke('set_trash', { expectedRoot, assetIds, trashed });
+}
+
+export async function backupLibrary(): Promise<BackupSummary | null> {
+  const path = await open({ directory: true, multiple: false, title: '选择备份存放位置（将新建备份文件夹）' });
+  if (!path) return null;
+  return invoke('backup_library', { targetParent: path });
+}
+
+export async function restoreBackup(): Promise<string | null> {
+  const backup = await open({ directory: true, multiple: false, title: '选择 StickerNest Backup 文件夹' });
+  if (!backup) return null;
+  const parent = await open({ directory: true, multiple: false, title: '选择恢复位置（将新建 StickerNest Library）' });
+  if (!parent) return null;
+  return invoke('restore_backup', { backupDir: backup, targetParent: parent });
+}
+
+export function openLibraryPath(path: string): Promise<Snapshot> {
+  return invoke<Snapshot>('select_library', { path, create: false });
 }

@@ -1,10 +1,15 @@
+pub mod backup;
 pub mod library;
 pub mod management;
 use management::ManagementSnapshot;
 
+use backup::BackupSummary;
 use library::{ImportReport, Library, LibrarySnapshot};
 use serde::Serialize;
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 use tauri::{Manager, State};
 
 #[derive(Default)]
@@ -143,6 +148,44 @@ fn import_provenance(
         account_id,
     )
 }
+#[tauri::command]
+fn set_trash(
+    state: State<'_, LibraryState>,
+    expected_root: String,
+    asset_ids: Vec<String>,
+    trashed: bool,
+) -> Result<ManagementSnapshot, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    current
+        .as_ref()
+        .ok_or("请先打开资料库")?
+        .set_trash(&expected_root, asset_ids, trashed)
+}
+#[tauri::command]
+async fn backup_library(
+    app: tauri::AppHandle,
+    target_parent: String,
+) -> Result<BackupSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<LibraryState>();
+        let current = state.0.lock().map_err(|_| "资料库忙")?;
+        current
+            .as_ref()
+            .ok_or("请先打开资料库")?
+            .backup_to(Path::new(&target_parent))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn restore_backup(backup_dir: String, target_parent: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        backup::restore(&PathBuf::from(backup_dir), &PathBuf::from(target_parent))
+            .map(|path| path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 
 pub fn run() {
     tauri::Builder::default()
@@ -154,7 +197,10 @@ pub fn run() {
             import_images,
             get_management,
             save_metadata,
-            import_provenance
+            import_provenance,
+            set_trash,
+            backup_library,
+            restore_backup
         ])
         .run(tauri::generate_context!())
         .expect("无法启动拾趣桌面应用");

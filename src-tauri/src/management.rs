@@ -7,6 +7,7 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 const LIMIT: usize = 20 * 1024 * 1024;
 const MAX_RECORDS: usize = 20_000;
@@ -49,6 +50,9 @@ pub struct ManagementSnapshot {
     pub accounts: Vec<Account>,
     pub references: Vec<Reference>,
     pub batches: Vec<Batch>,
+    /// Logical recycle bin: asset id → trashed-at unix seconds. Files stay in assets/.
+    #[serde(default)]
+    pub trash: BTreeMap<String, u64>,
 }
 impl Default for ManagementSnapshot {
     fn default() -> Self {
@@ -58,6 +62,7 @@ impl Default for ManagementSnapshot {
             accounts: vec![],
             references: vec![],
             batches: vec![],
+            trash: BTreeMap::new(),
         }
     }
 }
@@ -132,6 +137,7 @@ impl Library {
             || m.references.len() > MAX_RECORDS
             || m.accounts.len() > 1000
             || m.batches.len() > MAX_RECORDS
+            || m.trash.len() > MAX_RECORDS
         {
             return Err("管理文件版本或记录数量无效".into());
         }
@@ -148,6 +154,12 @@ impl Library {
         for (id, meta) in &m.metadata {
             if !hash_valid(id) || !metadata_valid(meta) {
                 return Err("管理文件素材信息无效".into());
+            }
+            self.asset_path(id)?;
+        }
+        for (id, at) in &m.trash {
+            if !hash_valid(id) || *at == 0 {
+                return Err("管理文件回收站记录无效".into());
             }
             self.asset_path(id)?;
         }
@@ -244,6 +256,41 @@ impl Library {
             m.metadata.remove(&asset_id);
         } else {
             m.metadata.insert(asset_id, meta);
+        }
+        self.write_management(&m)?;
+        Ok(m)
+    }
+    /// Logical trash only: asset files and library.json stay untouched.
+    pub fn set_trash(
+        &self,
+        expected_root: &str,
+        asset_ids: Vec<String>,
+        trashed: bool,
+    ) -> Result<ManagementSnapshot, String> {
+        self.check_expected_root(expected_root)?;
+        if asset_ids.is_empty() || asset_ids.len() > 2000 {
+            return Err("一次最多处理 2000 个素材".into());
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_secs();
+        let mut m = self.get_management()?;
+        let mut seen = HashSet::new();
+        for id in asset_ids {
+            if !hash_valid(&id) {
+                return Err("素材标识无效".into());
+            }
+            self.asset_path(&id)?;
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if trashed {
+                // Keep the original trash time when the item is already trashed.
+                m.trash.entry(id).or_insert(now);
+            } else {
+                m.trash.remove(&id);
+            }
         }
         self.write_management(&m)?;
         Ok(m)
@@ -545,6 +592,59 @@ mod tests {
             .import_provenance(&lib.snapshot().root, &p, "测试".into(), None)
             .is_err());
         assert!(!lib.management_path().exists());
+    }
+    #[test]
+    fn trash_and_restore_persist_without_touching_assets() {
+        let (_dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        let manifest = fs::read(Path::new(&root).join("library.json")).unwrap();
+        let bytes = fs::read(lib.asset_path(&ids[0]).unwrap()).unwrap();
+        let m = lib
+            .set_trash(&root, vec![ids[0].clone(), ids[0].clone()], true)
+            .unwrap();
+        assert_eq!(m.trash.len(), 1);
+        assert!(m.trash[&ids[0]] > 0);
+        assert_eq!(
+            manifest,
+            fs::read(Path::new(&root).join("library.json")).unwrap()
+        );
+        assert_eq!(bytes, fs::read(lib.asset_path(&ids[0]).unwrap()).unwrap());
+        let m = lib.set_trash(&root, vec![ids[0].clone()], true).unwrap();
+        assert_eq!(m.trash.len(), 1);
+        drop(lib);
+        let reopened = Library::open(Path::new(&root)).unwrap();
+        let m = reopened.get_management().unwrap();
+        assert_eq!(m.trash.len(), 1);
+        let m = reopened
+            .set_trash(&root, vec![ids[0].clone()], false)
+            .unwrap();
+        assert!(m.trash.is_empty());
+        let m = reopened.set_trash(&root, vec![ids[0].clone()], false).unwrap();
+        assert!(m.trash.is_empty());
+    }
+    #[test]
+    fn trash_rejects_unknown_assets_wrong_root_and_empty_selection() {
+        let (_dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        assert!(lib.set_trash("wrong", vec![ids[0].clone()], true).is_err());
+        assert!(lib.set_trash(&root, vec![], true).is_err());
+        assert!(lib.set_trash(&root, vec!["e".repeat(64)], true).is_err());
+        assert!(lib.set_trash(&root, vec!["not-a-hash".into()], true).is_err());
+        assert!(!lib.management_path().exists());
+    }
+    #[test]
+    fn provenance_import_keeps_trashed_assets_trashed() {
+        let (dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        lib.set_trash(&root, vec![ids[0].clone()], true).unwrap();
+        let p = dir.path().join("report.json");
+        report(&p, &ids[0]);
+        let m = lib
+            .import_provenance(&root, &p, "测试账号".into(), None)
+            .unwrap();
+        assert_eq!(m.references.len(), 2);
+        assert_eq!(m.trash.len(), 1);
+        assert!(m.trash.contains_key(&ids[0]));
     }
     #[cfg(unix)]
     #[test]
