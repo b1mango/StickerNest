@@ -220,6 +220,22 @@ fn create_group(
     )
 }
 #[tauri::command]
+fn save_group_metadata(
+    state: State<'_, LibraryState>,
+    expected_root: String,
+    group_id: String,
+    tags: Vec<String>,
+    collections: Vec<String>,
+) -> Result<ManagementSnapshot, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    current.as_ref().ok_or("请先打开资料库")?.save_group_metadata(
+        &expected_root,
+        &group_id,
+        tags,
+        collections,
+    )
+}
+#[tauri::command]
 fn disband_group(
     state: State<'_, LibraryState>,
     expected_root: String,
@@ -275,6 +291,7 @@ pub fn run() {
             scan_duplicates,
             create_group,
             disband_group,
+            save_group_metadata,
             ignore_pair,
             export_assets
         ])

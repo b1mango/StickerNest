@@ -75,6 +75,10 @@ export async function disbandGroup(expectedRoot: string, groupId: string): Promi
   return invoke('disband_group', { expectedRoot, groupId });
 }
 
+export async function saveGroupMetadata(expectedRoot: string, groupId: string, tags: string[], collections: string[]): Promise<import('./types').ManagementSnapshot> {
+  return invoke('save_group_metadata', { expectedRoot, groupId, tags, collections });
+}
+
 export async function ignorePair(expectedRoot: string, assetA: string, assetB: string): Promise<import('./types').ManagementSnapshot> {
   return invoke('ignore_pair', { expectedRoot, assetA, assetB });
 }

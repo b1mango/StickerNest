@@ -211,7 +211,6 @@ impl Library {
                 return Err("管理文件采集批次无效".into());
             }
         }
-        eprintln!("[validate] groups={} ignored={}", m.groups.len(), m.ignored_pairs.len());
         let mut grouped = HashSet::new();
         let mut group_ids = HashSet::new();
         for g in &m.groups {
@@ -244,7 +243,6 @@ impl Library {
             self.asset_path(a)?;
             self.asset_path(b)?;
         }
-        eprintln!("[validate] ok");
         Ok(())
     }
     pub fn get_management(&self) -> Result<ManagementSnapshot, String> {
@@ -411,6 +409,44 @@ impl Library {
             collections,
             created_at: now.as_secs(),
         });
+        self.write_management(&m)?;
+        Ok(m)
+    }
+    /// Edit a group's own tags/collections (group-level metadata, shown as a
+    /// union with member metadata). Members keep their own values.
+    pub fn save_group_metadata(
+        &self,
+        expected_root: &str,
+        group_id: &str,
+        tags: Vec<String>,
+        collections: Vec<String>,
+    ) -> Result<ManagementSnapshot, String> {
+        self.check_expected_root(expected_root)?;
+        let mut m = self.get_management()?;
+        let group = m
+            .groups
+            .iter_mut()
+            .find(|g| g.id == group_id)
+            .ok_or("版本分组不存在")?;
+        let normalize = |list: Vec<String>| {
+            let mut seen = HashSet::new();
+            list.into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && seen.insert(s.clone()))
+                .collect::<Vec<_>>()
+        };
+        let tags = normalize(tags);
+        let collections = normalize(collections);
+        if tags.len() > 50 || collections.len() > 50 {
+            return Err("分组的标签或合集最多 50 个".into());
+        }
+        if !tags.iter().all(|s| text_valid(s, 50, false))
+            || !collections.iter().all(|s| text_valid(s, 50, false))
+        {
+            return Err("标签和合集最多 50 字，不能含控制字符".into());
+        }
+        group.tags = tags;
+        group.collections = collections;
         self.write_management(&m)?;
         Ok(m)
     }
@@ -869,6 +905,41 @@ mod tests {
         let m = lib.ignore_pair(&root, &ids[0], &ids[1]).unwrap();
         assert_eq!(m.ignored_pairs.len(), 1);
         assert!(lib.ignore_pair(&root, &ids[0], &ids[0]).is_err());
+        let _ = dir;
+    }
+    #[test]
+    fn group_metadata_edits_validate_and_persist() {
+        let (dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        let m = lib
+            .create_group(&root, ids.clone(), ids[0].clone(), vec![], vec![])
+            .unwrap();
+        let group_id = m.groups[0].id.clone();
+        // Normalize, dedupe, persist.
+        let m = lib
+            .save_group_metadata(
+                &root,
+                &group_id,
+                vec![" 系列 ".into(), "系列".into()],
+                vec!["常用".into()],
+            )
+            .unwrap();
+        assert_eq!(m.groups[0].tags, vec!["系列"]);
+        assert_eq!(m.groups[0].collections, vec!["常用"]);
+        drop(lib);
+        let reopened = Library::open(Path::new(&root)).unwrap();
+        let m = reopened.get_management().unwrap();
+        assert_eq!(m.groups[0].tags, vec!["系列"]);
+        let m = reopened
+            .save_group_metadata(&root, &group_id, vec![], vec![])
+            .unwrap();
+        assert!(m.groups[0].tags.is_empty());
+        assert!(reopened
+            .save_group_metadata(&root, &"e".repeat(64), vec![], vec![])
+            .is_err());
+        assert!(reopened
+            .save_group_metadata(&root, &group_id, vec!["bad\u{202E}tag".into()], vec![])
+            .is_err());
         let _ = dir;
     }
     #[cfg(unix)]
