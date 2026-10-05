@@ -1,8 +1,10 @@
-//! Duplicate review: normalized-pixel identity plus a perceptual fingerprint,
+//! Duplicate review: normalized-pixel identity plus perceptual fingerprints,
 //! cached under cache/ and keyed by content hash and algorithm version. Static
-//! images only; animations stay with exact byte dedup and are never merged here.
+//! images use an 8×8 identity grid plus aHash; animations are compared on
+//! frame count, duration and three sampled frames — pairs are review
+//! candidates only, never auto-merged, never compared against statics.
 use crate::library::Library;
-use image::AnimationDecoder;
+use image::{AnimationDecoder, ImageDecoder};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -11,11 +13,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const ALGORITHM_VERSION: u32 = 1;
+const ALGORITHM_VERSION: u32 = 2;
 const CACHE_FILE: &str = "similarity-cache.json";
 const MAX_CACHE_ENTRIES: usize = 20_000;
 const SIMILAR_DISTANCE: u32 = 6;
 const MIN_DIMENSION: u32 = 8;
+/// Sum of per-sample Hamming distances allowed for an animation candidate.
+const ANIMATION_DISTANCE: u32 = 12;
+const MAX_ANIMATION_FRAMES: usize = 1000;
+const MAX_ANIMATION_PIXELS: u64 = 100_000_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -27,22 +33,45 @@ pub struct Fingerprints {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Fingerprint {
-    /// SHA-256 of the normalized 8×8 RGBA-8888 pixel grid.
+    /// SHA-256 of the normalized 8×8 RGBA-8888 pixel grid (first frame for animations).
     pub pixel_hash: String,
     /// 64-bit average hash over luma, computed with alpha flattened.
     pub a_hash: u64,
     pub has_alpha: bool,
+    /// Present for animations; statics never carry this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation: Option<AnimationInfo>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnimationInfo {
+    pub frames: u32,
+    pub duration_ms: u64,
+    /// aHash of frames 0, middle and last (full canvas, disposal applied).
+    pub samples: [u64; 3],
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all="camelCase")]
 pub struct ScanReport {
     pub scanned_statics: usize,
-    pub skipped_animations: usize,
+    pub scanned_animations: usize,
     pub skipped_tiny: usize,
     pub failed: Vec<ScanFailure>,
     pub exact_groups: Vec<CandidateGroup>,
     pub similar_pairs: Vec<SimilarPair>,
+    pub animation_pairs: Vec<AnimationPair>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct AnimationPair {
+    pub base_id: String,
+    pub other_id: String,
+    pub distance: u32,
+    pub frames: u32,
+    pub duration_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -150,7 +179,88 @@ fn fingerprint_of(bytes: &[u8]) -> Result<Fingerprint, String> {
         pixel_hash: sha256(&grid),
         a_hash: average_hash(&luma),
         has_alpha,
+        animation: None,
     })
+}
+
+/// Decode an animation to full-canvas frames (disposal/blend applied) and
+/// fingerprint its frame count, total duration and three sample frames.
+/// Import-time budgets are re-applied so pathological animations are bounded.
+/// Returns (grid digest, luma aHash, has_alpha of the first frame, info).
+fn animation_fingerprint_of(bytes: &[u8]) -> Result<(String, u64, bool, AnimationInfo), String> {
+    let collect = |frames: image::Frames<'_>| -> Result<Vec<image::Frame>, String> {
+        let mut out = Vec::new();
+        let mut pixels = 0_u64;
+        for (index, frame) in frames.into_iter().enumerate() {
+            if index >= MAX_ANIMATION_FRAMES {
+                return Err("动画超过本工具的 1000 帧限制".into());
+            }
+            let frame = frame.map_err(|e| format!("动画损坏：{e}"))?;
+            pixels += u64::from(frame.buffer().width()) * u64::from(frame.buffer().height());
+            if pixels > MAX_ANIMATION_PIXELS {
+                return Err("动画超过本工具的累计 1 亿解码像素限制".into());
+            }
+            out.push(frame);
+        }
+        Ok(out)
+    };
+    let frames = match image::guess_format(bytes) {
+        Ok(image::ImageFormat::Gif) => {
+            let mut decoder =
+                image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).map_err(err)?;
+            let mut limits = image::Limits::default();
+            limits.max_alloc = Some(128 * 1024 * 1024);
+            decoder.set_limits(limits).map_err(err)?;
+            collect(decoder.into_frames())?
+        }
+        Ok(image::ImageFormat::WebP) => {
+            let mut decoder =
+                image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).map_err(err)?;
+            let mut limits = image::Limits::default();
+            limits.max_alloc = Some(128 * 1024 * 1024);
+            decoder.set_limits(limits).map_err(err)?;
+            if !decoder.has_animation() {
+                return Err("不是动画素材".into());
+            }
+            collect(decoder.into_frames())?
+        }
+        _ => return Err("不支持的动画格式".into()),
+    };
+    if frames.len() < 2 {
+        return Err("单帧不是动画素材".into());
+    }
+    let mut duration_ms = 0_u64;
+    for frame in &frames {
+        let (numer, denom) = frame.delay().numer_denom_ms();
+        // An unspecified delay behaves like the format default (~100 ms).
+        duration_ms += if numer == 0 { 100 } else { (u64::from(numer) * 1000) / u64::from(denom.max(1)) };
+    }
+    let pick = [0, frames.len() / 2, frames.len() - 1];
+    let mut samples = [0_u64; 3];
+    let mut has_alpha = false;
+    let mut first: Option<([u8; 256], [u8; 64])> = None;
+    for (slot, index) in pick.iter().enumerate() {
+        let image = image::DynamicImage::ImageRgba8(frames[*index].buffer().clone());
+        let (grid, luma, alpha) = image_grids(&image)?;
+        if alpha {
+            has_alpha = true;
+        }
+        samples[slot] = average_hash(&luma);
+        if slot == 0 {
+            first = Some((grid, luma));
+        }
+    }
+    let (grid, luma) = first.expect("first sample always exists");
+    Ok((
+        sha256(&grid),
+        average_hash(&luma),
+        has_alpha,
+        AnimationInfo {
+            frames: frames.len() as u32,
+            duration_ms,
+            samples,
+        },
+    ))
 }
 
 impl Library {
@@ -219,10 +329,11 @@ impl Library {
         Ok(())
     }
 
-    /// Static scan only. Exact groups are stable assets sharing the same
-    /// normalized pixels; similar pairs are review candidates, never merged
-    /// automatically and reported as (base, other, distance) without claiming
-    /// transitivity. Ignored pairs and existing version groups are excluded.
+    /// Scan statics and animations. Exact groups are stable assets sharing
+    /// normalized pixels; similar and animation pairs are review candidates,
+    /// never merged automatically, reported without claiming transitivity.
+    /// Ignored pairs and existing version groups are excluded; animations are
+    /// only compared against other animations with matching frame counts.
     pub fn scan_static_duplicates(
         &self,
         ignored_pairs: &[(String, String)],
@@ -253,13 +364,15 @@ impl Library {
             .collect();
         let mut report = ScanReport {
             scanned_statics: 0,
-            skipped_animations: 0,
+            scanned_animations: 0,
             skipped_tiny: 0,
             failed: vec![],
             exact_groups: vec![],
             similar_pairs: vec![],
+            animation_pairs: vec![],
         };
         let mut live: Vec<(String, Fingerprint)> = vec![];
+        let mut animations: Vec<(String, Fingerprint)> = vec![];
         for item in self.snapshot().items {
             if trashed.contains(item.id.as_str()) {
                 continue;
@@ -274,17 +387,38 @@ impl Library {
                     continue;
                 }
             };
-            if is_animation(&bytes) {
-                report.skipped_animations += 1;
-                continue;
-            }
+            let animated = is_animation(&bytes);
             let fingerprint = match cache.entries.get(&item.id) {
                 Some(fingerprint)
                     if hash_valid(&fingerprint.pixel_hash)
-                        && fingerprint.a_hash.count_ones() <= 64 =>
+                        && fingerprint.a_hash.count_ones() <= 64
+                        && fingerprint.animation.is_some() == animated =>
                 {
                     fingerprint.clone()
                 }
+                _ if animated => match animation_fingerprint_of(&bytes) {
+                    Ok((digest, hash, has_alpha, info)) => {
+                        let fingerprint = Fingerprint {
+                            pixel_hash: digest,
+                            a_hash: hash,
+                            has_alpha,
+                            animation: Some(info),
+                        };
+                        cache.entries.insert(item.id.clone(), fingerprint.clone());
+                        fingerprint
+                    }
+                    Err(e) if e.contains("小于 8×8") => {
+                        report.skipped_tiny += 1;
+                        continue;
+                    }
+                    Err(e) => {
+                        report.failed.push(ScanFailure {
+                            asset_id: item.id.clone(),
+                            error: e,
+                        });
+                        continue;
+                    }
+                },
                 _ => match fingerprint_of(&bytes) {
                     Ok(fingerprint) => {
                         cache.entries.insert(item.id.clone(), fingerprint.clone());
@@ -303,10 +437,18 @@ impl Library {
                     }
                 },
             };
-            report.scanned_statics += 1;
-            live.push((item.id.clone(), fingerprint));
+            if animated {
+                report.scanned_animations += 1;
+                animations.push((item.id.clone(), fingerprint));
+            } else {
+                report.scanned_statics += 1;
+                live.push((item.id.clone(), fingerprint));
+            }
         }
-        cache.entries.retain(|id, _| live.iter().any(|(live_id, _)| live_id == id));
+        cache.entries.retain(|id, _| {
+            live.iter().any(|(live_id, _)| live_id == id)
+                || animations.iter().any(|(anim_id, _)| anim_id == id)
+        });
         self.write_fingerprints(&cache)?;
 
         // Exact identity also requires identical dimensions, illustrated by the
@@ -366,8 +508,64 @@ impl Library {
         report.similar_pairs.sort_by(|a, b| {
             (a.distance, &a.base_id, &a.other_id).cmp(&(b.distance, &b.base_id, &b.other_id))
         });
+
+        // Animation candidates: same frame count, duration within 10%, and the
+        // sum of per-sample Hamming distances within budget — pairs only.
+        for (index, (base_id, base)) in animations.iter().enumerate() {
+            if grouped.contains(base_id) {
+                continue;
+            }
+            let base_info = base.animation.as_ref().expect("animated fingerprint");
+            for (other_id, other) in animations.iter().skip(index + 1) {
+                if grouped.contains(other_id) {
+                    continue;
+                }
+                let other_info = other.animation.as_ref().expect("animated fingerprint");
+                if base_info.frames != other_info.frames
+                    || base.has_alpha != other.has_alpha
+                    || !duration_close(base_info.duration_ms, other_info.duration_ms)
+                {
+                    continue;
+                }
+                let key = if base_id <= other_id {
+                    (base_id.clone(), other_id.clone())
+                } else {
+                    (other_id.clone(), base_id.clone())
+                };
+                if ignored.contains(&key) {
+                    continue;
+                }
+                let distance: u32 = base_info
+                    .samples
+                    .iter()
+                    .zip(other_info.samples.iter())
+                    .map(|(a, b)| hamming(*a, *b))
+                    .sum();
+                if distance > 0 && distance <= ANIMATION_DISTANCE {
+                    report.animation_pairs.push(AnimationPair {
+                        base_id: base_id.clone(),
+                        other_id: other_id.clone(),
+                        distance,
+                        frames: base_info.frames,
+                        duration_ms: base_info.duration_ms.max(other_info.duration_ms),
+                    });
+                }
+            }
+        }
+        report.animation_pairs.sort_by(|a, b| {
+            (a.distance, &a.base_id, &a.other_id).cmp(&(b.distance, &b.base_id, &b.other_id))
+        });
         Ok(report)
     }
+}
+
+/// Durations within 10% (relative to the larger one), never matching zero.
+fn duration_close(a: u64, b: u64) -> bool {
+    if a == 0 || b == 0 {
+        return false;
+    }
+    let (larger, smaller) = if a >= b { (a, b) } else { (b, a) };
+    (larger - smaller) * 10 <= larger
 }
 
 /// Detect animation by counting frames past the first, mirroring the formats
@@ -382,7 +580,7 @@ fn is_animation(bytes: &[u8]) -> bool {
         }
         Ok(image::ImageFormat::WebP) => {
             image::codecs::webp::WebPDecoder::new(Cursor::new(bytes))
-                .map(|decoder| decoder.has_animation())
+                .map(|decoder| decoder.has_animation() && decoder.into_frames().nth(1).is_some())
                 .unwrap_or(false)
         }
         _ => false,
@@ -532,16 +730,29 @@ mod tests {
         let report = library
             .scan_static_duplicates(&[], &HashSet::new())
             .unwrap();
-        assert_eq!(report.skipped_animations, 1);
+        assert_eq!(report.scanned_animations, 1);
         assert_eq!(report.skipped_tiny, 1);
         assert_eq!(report.scanned_statics, 1);
         let cache_path = library.cache_path();
         assert!(cache_path.exists());
-        let before = fs::read(&cache_path).unwrap();
+        let before: Fingerprints = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
         library
             .scan_static_duplicates(&[], &HashSet::new())
             .unwrap();
-        assert_eq!(before, fs::read(&cache_path).unwrap());
+        let after: Fingerprints = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        // Re-scanning reuses the cache: identical entries, no rewriting.
+        assert_eq!(before.version, after.version);
+        assert_eq!(before.entries.len(), after.entries.len());
+        for (id, fingerprint) in &before.entries {
+            let next = &after.entries[id];
+            assert_eq!(fingerprint.pixel_hash, next.pixel_hash);
+            assert_eq!(fingerprint.a_hash, next.a_hash);
+            assert_eq!(fingerprint.has_alpha, next.has_alpha);
+            assert_eq!(
+                fingerprint.animation.as_ref().map(|a| (a.frames, a.duration_ms, a.samples)),
+                next.animation.as_ref().map(|a| (a.frames, a.duration_ms, a.samples))
+            );
+        }
     }
     fn red_one_pixel_delta() -> image::RgbaImage {
         // Checkerboard base (evades encoders' flat-color optimizations), with
@@ -666,6 +877,110 @@ mod tests {
         library
             .set_trash(&root, vec![ids[0].clone()], true)
             .unwrap();
+    }
+    fn two_frame_gif(path: &Path, first: [u8; 4], second: [u8; 4]) {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+            for color in [first, second] {
+                encoder
+                    .encode_frame(image::Frame::new(image::RgbaImage::from_pixel(
+                        16,
+                        16,
+                        image::Rgba(color),
+                    )))
+                    .unwrap();
+            }
+        }
+        fs::write(path, bytes).unwrap();
+    }
+    fn four_frame_gif(path: &Path) {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+            for color in [
+                [255, 0, 0, 255],
+                [0, 255, 0, 255],
+                [255, 0, 0, 255],
+                [0, 255, 0, 255],
+            ] {
+                encoder
+                    .encode_frame(image::Frame::new(image::RgbaImage::from_pixel(
+                        16,
+                        16,
+                        image::Rgba(color),
+                    )))
+                    .unwrap();
+            }
+        }
+        fs::write(path, bytes).unwrap();
+    }
+    #[test]
+    fn near_identical_animations_form_a_candidate_pair() {
+        let (dir, mut library) = fixture();
+        // Two-frame animation [red, black].
+        let a = dir.path().join("a2.gif");
+        two_frame_gif(&a, [255, 0, 0, 255], [0, 0, 0, 255]);
+        // Same two frames, second frame brightened in one corner: samples
+        // mostly match — a review candidate, and animations never enter the
+        // static exact/similar results.
+        let b = dir.path().join("b2.gif");
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+            encoder
+                .encode_frame(image::Frame::new(image::RgbaImage::from_pixel(
+                    16,
+                    16,
+                    image::Rgba([255, 0, 0, 255]),
+                )))
+                .unwrap();
+            let mut dark = image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 0, 0, 255]));
+            dark.put_pixel(15, 15, image::Rgba([40, 40, 40, 255]));
+            encoder.encode_frame(image::Frame::new(dark)).unwrap();
+        }
+        fs::write(&b, bytes).unwrap();
+        import(&mut library, vec![a, b]);
+        let report = library
+            .scan_static_duplicates(&[], &HashSet::new())
+            .unwrap();
+        assert_eq!(report.scanned_animations, 2);
+        assert_eq!(report.animation_pairs.len(), 1, "{:?}", report.animation_pairs);
+        assert!(report.animation_pairs[0].distance > 0 && report.animation_pairs[0].distance <= 12);
+        assert_eq!(report.animation_pairs[0].frames, 2);
+        assert!(report.exact_groups.is_empty());
+        assert!(report.similar_pairs.is_empty());
+    }
+    #[test]
+    fn different_frame_counts_do_not_pair() {
+        let (dir, mut library) = fixture();
+        let two = dir.path().join("two.gif");
+        two_frame_gif(&two, [255, 0, 0, 255], [0, 255, 0, 255]);
+        let four = dir.path().join("four.gif");
+        four_frame_gif(&four);
+        import(&mut library, vec![two, four]);
+        let report = library
+            .scan_static_duplicates(&[], &HashSet::new())
+            .unwrap();
+        assert_eq!(report.scanned_animations, 2);
+        assert!(report.animation_pairs.is_empty());
+    }
+    #[test]
+    fn animations_and_statics_never_pair() {
+        let (dir, mut library) = fixture();
+        let gif = dir.path().join("anim.gif");
+        two_frame_gif(&gif, [255, 0, 0, 255], [255, 0, 0, 255]);
+        let png = dir.path().join("flat.png");
+        save_png(&png, red(16, 16));
+        import(&mut library, vec![gif, png]);
+        let report = library
+            .scan_static_duplicates(&[], &HashSet::new())
+            .unwrap();
+        assert_eq!(report.scanned_animations, 1);
+        assert_eq!(report.scanned_statics, 1);
+        assert!(report.animation_pairs.is_empty());
+        assert!(report.similar_pairs.is_empty());
+        assert!(report.exact_groups.is_empty());
     }
     #[test]
     fn trashed_assets_are_not_scanned() {

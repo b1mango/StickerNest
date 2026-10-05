@@ -59,13 +59,22 @@ export interface ManagementSnapshot {
   ignoredPairs: [string, string][];
 }
 
+export interface AnimationPair {
+  baseId: string;
+  otherId: string;
+  distance: number;
+  frames: number;
+  durationMs: number;
+}
+
 export interface ScanReport {
   scannedStatics: number;
-  skippedAnimations: number;
+  scannedAnimations: number;
   skippedTiny: number;
   failed: { assetId: string; error: string }[];
   exactGroups: { pixelHash: string; assetIds: string[] }[];
   similarPairs: { baseId: string; otherId: string; distance: number }[];
+  animationPairs: AnimationPair[];
 }
 
 export interface ExportSummary {
