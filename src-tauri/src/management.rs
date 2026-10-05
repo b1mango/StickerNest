@@ -668,7 +668,9 @@ impl Library {
             {
                 return Err("报告含重复或无效收藏 ID".into());
             }
-            if row.status == "failed" {
+            if row.status == "failed" || row.status == "pending_inspection" {
+                // Failed downloads and undecodable staged files both stay out
+                // of the mapping; they remain visible in the batch counts.
                 failed += 1;
                 continue;
             }
@@ -832,6 +834,25 @@ mod tests {
             .save_metadata(&root, ids[0].clone(), "x".into(), vec![], vec![])
             .is_err());
         assert_eq!(fs::read(p).unwrap(), b"broken");
+    }
+    #[test]
+    fn pending_inspection_rows_count_as_failures_not_errors() {
+        let (dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        let path = dir.path().join("report.json");
+        fs::write(&path, serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1, "expected_items": 3, "items": [
+                {"id": "100", "status": "verified", "sha256": ids[0], "resource_identity": "a".repeat(64)},
+                {"id": "200", "status": "pending_inspection", "error": "unidentified_image"},
+                {"id": "300", "status": "failed"}
+            ]
+        })).unwrap()).unwrap();
+        let m = lib
+            .import_provenance(&root, &path, "测试账号".into(), None)
+            .unwrap();
+        assert_eq!(m.references.len(), 1);
+        let batch = &m.batches[0];
+        assert_eq!((batch.collection_items, batch.mapped_resources, batch.failed_resources), (3, 1, 2));
     }
     #[test]
     fn provenance_is_idempotent_and_keeps_versions() {

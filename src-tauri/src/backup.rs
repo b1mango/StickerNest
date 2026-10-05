@@ -465,6 +465,99 @@ fn truncate_utf8(name: &str, max_bytes: usize) -> &str {
     &name[..end]
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectStageResult {
+    pub stage: String,
+    pub detail: String,
+}
+
+impl Library {
+    /// Stage 1 of the in-app Douyin collection: run the local node collector
+    /// (Chrome DevTools) and the resumable python downloader. Everything lands
+    /// under downloads/ inside the library; assets are imported in stage 2.
+    pub fn collect_douyin_fetch(
+        &self,
+        scripts_dir: &Path,
+        chrome_port: u16,
+    ) -> Result<CollectStageResult, String> {
+        let root = PathBuf::from(self.snapshot().root);
+        let downloads = root.join("downloads");
+        fs::create_dir_all(&downloads).map_err(|e| format!("无法创建采集目录：{e}"))?;
+        let list_path = downloads.join("stickers.json");
+        let collector = scripts_dir.join("collect_douyin.mjs");
+        if !collector.is_file() {
+            return Err(format!(
+                "缺少采集脚本 collect_douyin.mjs（搜索位置：{}）。请用 npm run desktop 从项目目录启动应用。",
+                scripts_dir.display()
+            ));
+        }
+        let output = std::process::Command::new("node")
+            .arg(&collector)
+            .arg("--out")
+            .arg(&list_path)
+            .arg("--port")
+            .arg(chrome_port.to_string())
+            .output()
+            .map_err(|e| format!("无法启动 node（请先安装 Node.js）：{e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("收藏清单读取未完成：{}", stderr.trim()));
+        }
+        let stickers: Vec<serde_json::Value> =
+            serde_json::from_slice(&fs::read(&list_path).map_err(|e| format!("清单文件读取失败：{e}"))?)
+                .map_err(|e| format!("清单文件不是有效列表：{e}"))?;
+        if stickers.is_empty() {
+            return Err("收藏清单为空".into());
+        }
+        let downloader = scripts_dir.join("download_douyin.py");
+        if !downloader.is_file() {
+            return Err("缺少下载脚本 download_douyin.py".into());
+        }
+        let output = std::process::Command::new("python3")
+            .arg(&downloader)
+            .arg(&list_path)
+            .arg(&downloads)
+            .output()
+            .map_err(|e| format!("无法启动 python3：{e}"))?;
+        if !output.status.success() {
+            // The downloader prints per-item and summary failures to stdout.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let detail = if stderr.trim().is_empty() {
+                stdout.trim().to_string()
+            } else if stdout.trim().is_empty() {
+                stderr.trim().to_string()
+            } else {
+                format!("{}\n{}", stderr.trim(), stdout.trim())
+            };
+            return Err(format!("资源下载未完成：{}", detail.chars().take(600).collect::<String>()));
+        }
+        Ok(CollectStageResult {
+            stage: "fetch".into(),
+            detail: format!("清单 {} 项，原件已下载到 downloads（中断可重试）", stickers.len()),
+        })
+    }
+
+    /// Stage 2: import the staged originals and return the report path for
+    /// account mapping (import_provenance handles the account step in the UI).
+    pub fn collect_douyin_import(&mut self) -> Result<(crate::library::ImportReport, PathBuf), String> {
+        let downloads = PathBuf::from(self.snapshot().root).join("downloads");
+        let originals = downloads.join("originals");
+        let mut paths: Vec<PathBuf> = fs::read_dir(&originals)
+            .map_err(|e| format!("下载原件目录不存在，请先执行采集：{e}"))?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .collect();
+        paths.sort();
+        if paths.is_empty() {
+            return Err("downloads 中没有原件，请先执行采集".into());
+        }
+        // Safe local import of files this app downloaded itself.
+        let report = self.import_files(paths, "抖音".into())?;
+        Ok((report, downloads.join("report.json")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,6 +758,79 @@ mod tests {
         assert!(lib
             .export_assets(&root, &ids, &names)
             .is_err());
+    }
+    #[test]
+    fn collect_douyin_import_stages_originals_and_returns_report_path() {
+        let (dir, mut lib, _ids0) = fixture();
+        let root = PathBuf::from(lib.snapshot().root);
+        let originals = root.join("downloads").join("originals");
+        fs::create_dir_all(&originals).unwrap();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 9, 9, 255]))
+            .save(originals.join("a.png"))
+            .unwrap();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([8, 8, 8, 255]))
+            .save(originals.join("b.png"))
+            .unwrap();
+        fs::write(root.join("downloads").join("report.json"), b"{}").unwrap();
+        let (report, report_path) = lib.collect_douyin_import().unwrap();
+        assert_eq!(report.added, 2);
+        assert!(report_path.ends_with("downloads/report.json"));
+        assert_eq!(lib.snapshot().items.len(), 4);
+        assert!(lib
+            .snapshot()
+            .items
+            .iter()
+            .all(|item| item.sources.contains(&"抖音".to_string()) || item.sources.contains(&"本地".to_string())));
+        // Missing originals is a clear error, not an empty success.
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut lib2 = Library::create(dir2.path()).unwrap();
+        assert!(lib2.collect_douyin_import().is_err());
+        let _ = dir;
+    }
+    #[cfg(unix)]
+    #[test]
+    fn collect_pipeline_runs_collector_then_downloader() {
+        use std::os::unix::fs::PermissionsExt;
+        // Shim "node" records the invocation and writes a two-sticker list.
+        let (dir, mut lib, _ids) = fixture();
+        let root = PathBuf::from(lib.snapshot().root);
+        let shim = dir.path().join("shim");
+        fs::create_dir(&shim).unwrap();
+        let node_shim = shim.join("node");
+        fs::write(
+            &node_shim,
+            "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--out\" ]; then out=\"$2\"; shift 2; continue; fi\n  shift\ndone\nprintf '[{\"id_str\":\"1\",\"animate_url\":{\"url_list\":[\"https://p3-im-emoticon-sign.byteimg.com/a.webp\"]}},{\"id_str\":\"2\",\"static_url\":{\"url_list\":[\"https://p3-im-emoticon-sign.byteimg.com/b.webp\"]}}]' > \"$out\"\necho found 2 >&2\n",
+        )
+        .unwrap();
+        let python_shim = shim.join("python3");
+        fs::write(
+            &python_shim,
+            "#!/bin/sh\ndest=\"$2\"\nmkdir -p \"$dest/originals\"\npython3 - \"$dest\" <<'PY2' 2>/dev/null || true\nPY2\nexit 0\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&node_shim).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&node_shim, permissions.clone()).unwrap();
+        fs::set_permissions(&python_shim, permissions).unwrap();
+        // python shim needs to actually create originals; use printf-based png.
+        fs::write(
+            &python_shim,
+            "#!/bin/sh\ndest=\"$2\"\nmkdir -p \"$dest/originals\"\ntouch \"$dest/report.json\"\nexit 0\n",
+        )
+        .unwrap();
+        fs::set_permissions(&python_shim, fs::metadata(&node_shim).unwrap().permissions()).unwrap();
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{shim}:{old_path}", shim = shim.display()));
+        let scripts = dir.path().join("scripts");
+        fs::create_dir(&scripts).unwrap();
+        fs::write(scripts.join("collect_douyin.mjs"), "// shim\n").unwrap();
+        fs::write(scripts.join("download_douyin.py"), "# shim\n").unwrap();
+        let result = lib.collect_douyin_fetch(&scripts, 9222);
+        std::env::set_var("PATH", old_path);
+        let result = result.unwrap();
+        assert_eq!(result.stage, "fetch");
+        assert!(result.detail.contains("2 项"));
+        assert!(root.join("downloads/stickers.json").exists());
     }
     #[test]
     fn export_sanitizes_names_and_rejects_empty_selection() {

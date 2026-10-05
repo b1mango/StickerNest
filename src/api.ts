@@ -87,6 +87,18 @@ export async function batchLabels(expectedRoot: string, assetIds: string[], addT
   return invoke('batch_labels', { expectedRoot, assetIds, addTags, removeTags, addCollections, removeCollections });
 }
 
+export async function collectDouyinFetch(chromePort?: number): Promise<{ stage: string; detail: string }> {
+  return invoke('collect_douyin_fetch', { chromePort: chromePort ?? null });
+}
+
+export async function collectDouyinImport(): Promise<{ snapshot: Snapshot; report: ImportReport; previewWarnings: string[]; reportPath: string }> {
+  return invoke('collect_douyin_import');
+}
+
+export async function importProvenanceAtPath(expectedRoot: string, path: string, accountAlias: string, accountId: string | null): Promise<import('./types').ManagementSnapshot> {
+  return invoke('import_provenance', { expectedRoot, path, accountAlias, accountId });
+}
+
 export async function ignorePair(expectedRoot: string, assetA: string, assetB: string): Promise<import('./types').ManagementSnapshot> {
   return invoke('ignore_pair', { expectedRoot, assetA, assetB });
 }

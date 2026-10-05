@@ -7,6 +7,7 @@ import { StickerPreview } from './components/StickerPreview';
 import { ManagementPanel } from './components/ManagementPanel';
 import { DuplicateReview } from './components/DuplicateReview';
 import { BatchPanel } from './components/BatchPanel';
+import { CollectDialog } from './components/CollectDialog';
 import './styles.css';
 
 const PAGE_SIZE = 60;
@@ -78,6 +79,7 @@ export default function App() {
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [showBatch, setShowBatch] = useState(false);
   const [includeVersions, setIncludeVersions] = useState(false);
+  const [showCollect, setShowCollect] = useState(false);
   const locked = useRef(false);
 
   useEffect(() => {
@@ -330,6 +332,7 @@ export default function App() {
         <div className="sidebar-bottom">
           <div className="local-indicator"><HardDrive size={16} /><span>本地存储</span><span className="status-dot" /></div>
           <button className="button secondary full-width" disabled={disabled} onClick={() => openLibrary(false)}><FolderOpen size={16} />打开资料库</button>
+          {library ? <button className="button secondary full-width" disabled={disabled} onClick={() => setShowCollect(true)}><Music2 size={16} />采集抖音收藏</button> : null}
           {library ? <button className="button secondary full-width" disabled={disabled} onClick={backupCurrentLibrary}><HardDriveDownload size={16} />备份资料库</button> : null}
           <div className="sidebar-links">
             {library ? <button className="text-button" disabled={disabled} onClick={() => openLibrary(true)}>新建资料库</button> : null}
@@ -362,6 +365,7 @@ export default function App() {
       </main>
       {selected && library ? <StickerDetail key={selected.id} item={selected} root={library.root} metadata={management?.metadata[selected.id]} editable={!!management && !disabled} trashed={!!management?.trash[selected.id]} trashedAt={management?.trash[selected.id]} onSave={metadata => editMetadata(selected.id, metadata)} onSetTrash={value => setItemsTrash([selected.id], value)} onClose={() => setSelected(null)} /> : null}
       {showDuplicates && scanReport && library && management ? <DuplicateReview report={scanReport} items={library.items} root={library.root} existingGroups={management.groups} onGroup={groupMembers} onIgnorePair={ignoreSimilarPair} onRescan={async () => setScanReport(await scanDuplicates())} onClose={() => setShowDuplicates(false)} /> : null}
+      {showCollect && library && management ? <CollectDialog root={library.root} accounts={management.accounts.filter(a => a.platform === '抖音')} onSnapshot={(snapshot, warning) => { setLibrary(snapshot); setPage(1); if (warning) setPreviewWarning(warning); }} onManagement={setManagement} onError={setError} onClose={() => setShowCollect(false)} /> : null}
     </div>
   );
 }

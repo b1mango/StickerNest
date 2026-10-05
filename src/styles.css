@@ -201,6 +201,8 @@ h1 { display: flex; align-items: center; gap: 16px; font-size: 28px; font-weight
 .batch-section input.batch-number { flex: 0 0 96px; max-width: 96px; }
 .batch-label { font-size: 11px; color: var(--ink-secondary); min-width: 44px; }
 .text-button.danger-link { color: var(--danger); justify-self: start; }
+.collect-dialog { max-width: 620px; width: min(92vw, 620px); }
+.collect-content { display: grid; gap: 16px; }
 .group-meta { width: 100%; max-width: 520px; }
 .group-row { grid-column: 1 / -1; display: grid; gap: 12px; background: var(--paper-raised); border: 1px solid var(--rule); border-radius: var(--radius-card); padding: 14px; }
 .group-meta-row { display: flex; gap: 12px; align-items: center; justify-content: space-between; }

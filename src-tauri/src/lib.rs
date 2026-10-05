@@ -297,6 +297,66 @@ fn ignore_pair(
         .ignore_pair(&expected_root, &asset_a, &asset_b)
 }
 #[tauri::command]
+async fn collect_douyin_fetch(
+    app: tauri::AppHandle,
+    chrome_port: Option<u16>,
+) -> Result<backup::CollectStageResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<LibraryState>();
+        let current = state.0.lock().map_err(|_| "资料库忙，请稍后再试")?;
+        let scripts = scripts_dir();
+        current
+            .as_ref()
+            .ok_or("请先打开资料库")?
+            .collect_douyin_fetch(&scripts, chrome_port.unwrap_or(9222))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn collect_douyin_import(app: tauri::AppHandle) -> Result<CollectImportResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<LibraryState>();
+        let mut current = state.0.lock().map_err(|_| "资料库忙，请稍后再试")?;
+        let library = current.as_mut().ok_or("请先打开资料库")?;
+        let (report, report_path) = library.collect_douyin_import()?;
+        let preview_warnings = authorize_assets(&app, library);
+        Ok(CollectImportResponse {
+            snapshot: library.snapshot(),
+            report,
+            preview_warnings,
+            report_path: report_path.to_string_lossy().into_owned(),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Scripts live next to the project, both in `tauri dev` (cwd = src-tauri)
+/// and when started from the project root. Double-clicking the .app leaves
+/// cwd elsewhere; report the searched roots so the user knows to use
+/// `npm run desktop` from the project directory.
+fn scripts_dir() -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    for candidate in [cwd.join("scripts"), cwd.join("../scripts")] {
+        if candidate.join("collect_douyin.mjs").is_file() {
+            return candidate;
+        }
+    }
+    cwd.join("scripts")
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CollectImportResponse {
+    snapshot: LibrarySnapshot,
+    report: ImportReport,
+    preview_warnings: Vec<String>,
+    report_path: String,
+}
+
+#[tauri::command]
 fn export_assets(
     state: State<'_, LibraryState>,
     expected_root: String,
@@ -331,7 +391,9 @@ pub fn run() {
             disband_group,
             save_group_metadata,
             ignore_pair,
-            export_assets
+            export_assets,
+            collect_douyin_fetch,
+            collect_douyin_import
         ])
         .run(tauri::generate_context!())
         .expect("无法启动拾趣桌面应用");
