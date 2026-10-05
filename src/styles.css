@@ -99,7 +99,7 @@ h1 { display: flex; align-items: center; gap: 16px; font-size: 28px; font-weight
 .sticker-card { min-width: 0; width: 100%; display: block; border: 0; padding: 0; background: none; text-align: left; border-radius: var(--radius-card); }
 .sticker-image { position: relative; aspect-ratio: 1; padding: 20px; display: flex; align-items: center; justify-content: center; background: var(--paper-raised); border: 1px solid var(--rule); border-radius: var(--radius-card); overflow: hidden; }
 .sticker-card:hover .sticker-image { border-color: var(--rule-strong); }
-.sticker-image img { display: block; width: 100%; height: 100%; object-fit: contain; outline: 1px solid rgba(0, 0, 0, .06); outline-offset: -1px; }
+.sticker-image img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .format-badge { position: absolute; bottom: 8px; right: 8px; padding: 3px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; background: var(--paper); border: 1px solid var(--rule); color: var(--ink-secondary); }
 .sticker-info { padding: 12px 2px 0; }
 .sticker-info strong { display: block; font-weight: 550; font-size: 12px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
@@ -161,7 +161,8 @@ h1 { display: flex; align-items: center; gap: 16px; font-size: 28px; font-weight
 }
 @media (prefers-reduced-motion: reduce) { .spin { animation: none; } button:active:not(:disabled) { transform: none; } }
 /* Management components share the library's paper surfaces and forest controls. */
-.management-filters { display: flex; gap: 20px; flex-wrap: wrap; padding-top: 16px; }
+.management-filters { display: flex; gap: 16px; flex-wrap: wrap; padding-top: 16px; }
+.management-filters select { height: 36px; font-size: 12px; padding: 0 8px; max-width: 160px; border-radius: var(--radius-control); border: 1px solid var(--rule); background: var(--paper-raised); color: var(--ink); }
 .management-panel { border-bottom: 1px solid var(--rule); padding: 4px 0 16px; font-size: 12px; }
 .management-panel > summary { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; min-height: 44px; cursor: pointer; color: var(--forest); font-weight: 550; }
 .management-panel > summary::before { content: '+'; font-size: 18px; }
