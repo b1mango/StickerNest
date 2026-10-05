@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Archive, ArchiveRestore, ArrowDownToLine, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Copy, Folder, FolderOpen, FolderPlus, HardDrive, HardDriveDownload, Images, Layers, LoaderCircle, MessageCircle, Music2, Search, Smile, Trash2, X } from 'lucide-react';
-import { chooseLibrary, currentLibrary, imageUrl, importImages, isDesktop, getManagement, saveMetadata, importProvenance, setTrash, backupLibrary, restoreBackup, openLibraryPath, scanDuplicates, createGroup, disbandGroup, ignorePair, exportAssets, saveGroupMetadata, batchRename, batchLabels } from './api';
+import { chooseLibrary, currentLibrary, imageUrl, importImages, isDesktop, getManagement, saveMetadata, importProvenance, setTrash, backupLibrary, restoreBackup, openLibraryPath, scanDuplicates, disbandGroup, ignorePair, exportAssets, saveGroupMetadata, batchRename, batchLabels } from './api';
 import { SOURCE_LABELS, formatBytes, type ExportSummary, type ImportReport, type ScanReport, type Snapshot, type Sticker, type ManagementSnapshot, type AssetMetadata } from './types';
 import { StickerDetail } from './components/StickerDetail';
 import { StickerPreview } from './components/StickerPreview';
@@ -157,22 +157,17 @@ export default function App() {
     });
   }
 
-  async function groupMembers(memberIds: string[], mainAssetId: string) {
+  async function keepOneAsset(_keepId: string, removedIds: string[]) {
     if (!library) throw new Error('请先打开资料库。');
-    const updated = await createGroup(library.root, memberIds, mainAssetId, [], []);
-    setManagement(updated);
-    // Hidden members must not stay selected for a later "export selection".
-    setCheckedIds(current => {
-      const hidden = new Set(memberIds.filter(id => id !== mainAssetId));
-      return new Set([...current].filter(id => !hidden.has(id)));
-    });
+    // Others move to the recycle bin, recoverable any time from the trash view.
+    setManagement(await setTrash(library.root, removedIds, true));
+    setCheckedIds(current => new Set([...current].filter(id => !removedIds.includes(id))));
   }
 
   async function ignoreSimilarPair(a: string, b: string) {
     if (!library) throw new Error('请先打开资料库。');
     setManagement(await ignorePair(library.root, a, b));
-    // Re-scan removes the ignored pair from the visible review list.
-    setScanReport(await scanDuplicates());
+    // The caller re-scans once after the action, not here.
   }
 
   function exportSelection() {
@@ -324,7 +319,7 @@ export default function App() {
   const inEmptyTrash = source === 'trash' && !isFiltering;
   const inEmptyGroups = source === 'groups' && !isFiltering;
   const emptyTitle = inEmptyTrash ? '回收站是空的' : inEmptyGroups ? '还没有版本分组' : isFiltering ? '没有匹配的表情' : '还没有表情';
-  const emptyHint = inEmptyTrash ? '移入回收站的素材会保留在这里，可随时恢复。' : inEmptyGroups ? '通过“查重扫描”得到的分组会显示在这里。' : isFiltering ? '试试其他关键词或筛选。' : '导入本地图片或动图。';
+  const emptyHint = inEmptyTrash ? '移入回收站的素材会保留在这里，可随时恢复。' : inEmptyGroups ? '还没有版本分组。' : isFiltering ? '试试其他关键词或筛选。' : '导入本地图片或动图。';
   const inSelectableView = source !== 'trash' && source !== 'groups';
 
   return (
@@ -371,7 +366,7 @@ export default function App() {
         <footer className="library-footer"><Folder size={14} /><span title={library?.root}>{library?.root ?? '尚未选择资料库'}</span><span className="footer-count">{library ? `${library.items.length} 个原始素材` : '本地资料库'}</span></footer>
       </main>
       {selected && library ? <StickerDetail key={selected.id} item={selected} root={library.root} metadata={management?.metadata[selected.id]} editable={!!management && !disabled} trashed={!!management?.trash[selected.id]} trashedAt={management?.trash[selected.id]} onSave={metadata => editMetadata(selected.id, metadata)} onSetTrash={value => setItemsTrash([selected.id], value)} onClose={() => setSelected(null)} /> : null}
-      {showDuplicates && scanReport && library && management ? <DuplicateReview report={scanReport} items={library.items} root={library.root} existingGroups={management.groups} onGroup={groupMembers} onIgnorePair={ignoreSimilarPair} onRescan={async () => setScanReport(await scanDuplicates())} onClose={() => setShowDuplicates(false)} /> : null}
+      {showDuplicates && scanReport && library && management ? <DuplicateReview report={scanReport} items={library.items} root={library.root} existingGroups={management.groups} onKeep={keepOneAsset} onIgnorePair={ignoreSimilarPair} onRescan={async () => setScanReport(await scanDuplicates())} onClose={() => setShowDuplicates(false)} /> : null}
       {showCollect && library && management ? <CollectDialog root={library.root} accounts={management.accounts.filter(a => a.platform === '抖音')} onSnapshot={(snapshot, warning) => { setLibrary(snapshot); setPage(1); if (warning) setPreviewWarning(warning); }} onManagement={setManagement} onError={setError} onClose={() => setShowCollect(false)} /> : null}
     </div>
   );
