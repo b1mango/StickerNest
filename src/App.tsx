@@ -1,11 +1,12 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Archive, ArchiveRestore, ArrowDownToLine, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Copy, Folder, FolderOpen, FolderPlus, HardDrive, HardDriveDownload, Images, Layers, LoaderCircle, MessageCircle, Music2, Search, Smile, Trash2, X } from 'lucide-react';
-import { chooseLibrary, currentLibrary, imageUrl, importImages, isDesktop, getManagement, saveMetadata, importProvenance, setTrash, backupLibrary, restoreBackup, openLibraryPath, scanDuplicates, createGroup, disbandGroup, ignorePair, exportAssets, saveGroupMetadata } from './api';
+import { chooseLibrary, currentLibrary, imageUrl, importImages, isDesktop, getManagement, saveMetadata, importProvenance, setTrash, backupLibrary, restoreBackup, openLibraryPath, scanDuplicates, createGroup, disbandGroup, ignorePair, exportAssets, saveGroupMetadata, batchRename, batchLabels } from './api';
 import { SOURCE_LABELS, formatBytes, type ExportSummary, type ImportReport, type ScanReport, type Snapshot, type Sticker, type ManagementSnapshot, type AssetMetadata } from './types';
 import { StickerDetail } from './components/StickerDetail';
 import { StickerPreview } from './components/StickerPreview';
 import { ManagementPanel } from './components/ManagementPanel';
 import { DuplicateReview } from './components/DuplicateReview';
+import { BatchPanel } from './components/BatchPanel';
 import './styles.css';
 
 const PAGE_SIZE = 60;
@@ -75,6 +76,8 @@ export default function App() {
   const [selected, setSelected] = useState<Sticker | null>(null);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const [showBatch, setShowBatch] = useState(false);
+  const [includeVersions, setIncludeVersions] = useState(false);
   const locked = useRef(false);
 
   useEffect(() => {
@@ -105,7 +108,7 @@ export default function App() {
   }
 
   async function applyLibrary(snapshot: Snapshot) {
-    setLibrary(snapshot); setManagementNotice(''); setManagement(null); setManagementError(''); setTag(''); setCollection(''); setReport(null); setSelected(null); setQuery(''); setSource('all'); setPage(1); setBackupNotice(null); setExportNotice(null); setScanReport(null); setShowDuplicates(false); setCheckedIds(new Set()); setExpandedGroups(new Set());
+    setLibrary(snapshot); setManagementNotice(''); setManagement(null); setManagementError(''); setTag(''); setCollection(''); setReport(null); setSelected(null); setQuery(''); setSource('all'); setPage(1); setBackupNotice(null); setExportNotice(null); setScanReport(null); setShowDuplicates(false); setCheckedIds(new Set()); setExpandedGroups(new Set()); setShowBatch(false); setIncludeVersions(false);
     try { setManagement(await getManagement()); } catch (reason) { setManagementError(String(reason)); }
   }
 
@@ -168,12 +171,48 @@ export default function App() {
   function exportSelection() {
     void run('正在导出素材', async () => {
       if (!library) return;
-      const ids = checkedIds.size ? [...checkedIds] : filtered.map(item => item.id);
+      let ids = checkedIds.size ? [...checkedIds] : filtered.map(item => item.id);
+      if (includeVersions && management) {
+        const expanded = new Set(ids);
+        for (const group of management.groups) {
+          if (group.memberIds.some(id => expanded.has(id))) group.memberIds.forEach(id => expanded.add(id));
+        }
+        ids = [...expanded];
+      }
       // nameMap must carry bare display names only; the manifest name retains
       // its original extension, which the Rust side strips when rebuilding.
       const nameMap = Object.fromEntries(displayItems.filter(item => ids.includes(item.id)).map(item => [item.id, management?.metadata[item.id]?.name || item.name.replace(/\.[a-z0-9]+$/i, '')]));
       const result = await exportAssets(library.root, ids, nameMap);
       if (result) { setExportNotice(result); setCheckedIds(new Set()); }
+    });
+  }
+
+  function selectedInDisplayOrder(): string[] {
+    // Numbering follows the visible grid order, not the click order.
+    return displayItems.filter(item => checkedIds.has(item.id)).map(item => item.id);
+  }
+
+  async function batchRenameSelected(prefix: string, start: number) {
+    if (!library) throw new Error('请先打开资料库。');
+    await run('正在批量重命名', async () => {
+      setManagement(await batchRename(library.root, selectedInDisplayOrder(), prefix, start));
+      setShowBatch(false);
+    });
+  }
+
+  async function batchLabelsSelected(addTags: string[], removeTags: string[], addCollections: string[], removeCollections: string[]) {
+    if (!library) throw new Error('请先打开资料库。');
+    await run('正在批量整理', async () => {
+      setManagement(await batchLabels(library.root, selectedInDisplayOrder(), addTags, removeTags, addCollections, removeCollections));
+    });
+  }
+
+  async function trashSelected() {
+    if (!library) throw new Error('请先打开资料库。');
+    await run('正在移入回收站', async () => {
+      setManagement(await setTrash(library.root, [...checkedIds], true));
+      setCheckedIds(new Set());
+      setShowBatch(false);
     });
   }
 
@@ -317,7 +356,8 @@ export default function App() {
         {previewWarning ? <div className="notice warning" role="status"><CircleAlert size={18} /><div><strong>预览提示</strong><p>{previewWarning}</p><p>请检查原文件是否仍在。</p></div><button className="icon-button" aria-label="关闭预览提示" onClick={() => setPreviewWarning('')}><X size={17} /></button></div> : null}
         {report ? <div className={`notice import-report ${report.failed.length ? 'warning' : 'success'}`} role="status"><CheckCircle2 size={18} /><div><strong>导入完成</strong><p>新增 {report.added} 个 · 重复 {report.duplicates} 个 · 失败 {report.failed.length} 个</p>{report.duplicates > 0 && trashSet.size > 0 ? <p>重复项未显示时，可能在回收站中。</p> : null}{report.failed.length ? <details><summary>查看失败文件</summary><ul>{report.failed.map((failure, index) => <li key={`${index}-${failure.name}`}><b>{failure.name}</b>：{failure.error}</li>)}</ul><p>修复后重新导入，已入库项会自动去重。</p></details> : null}</div><button className="icon-button" aria-label="关闭导入结果" onClick={() => setReport(null)}><X size={17} /></button></div> : null}
 
-        {!library ? <section className="empty-state welcome"><span className="empty-icon"><Archive size={38} strokeWidth={1.4} /></span><h2>打开你的表情库</h2><p>新建或打开一个本地文件夹。</p><div className="empty-actions"><button className="button primary" disabled={disabled} onClick={() => openLibrary(true)}><FolderPlus size={18} />新建资料库</button><button className="button secondary" disabled={disabled} onClick={() => openLibrary(false)}><FolderOpen size={18} />打开已有资料库</button></div></section> : visible.length === 0 ? <section className="empty-state"><span className="empty-icon">{inEmptyTrash ? <Trash2 size={36} strokeWidth={1.4} /> : <Images size={36} strokeWidth={1.4} />}</span><h2>{emptyTitle}</h2><p>{emptyHint}</p>{isFiltering ? <button className="button secondary" onClick={() => { setQuery(''); setTag(''); setCollection(''); setSource('all'); setPage(1); }}>查看全部表情</button> : source === 'trash' || source === 'groups' ? null : <button className="button primary" disabled={disabled} onClick={importFiles}><ArrowDownToLine size={18} />导入表情</button>}</section> : <><div className="collection-caption"><span>{query ? `找到 ${filtered.length} 个表情` : `共 ${filtered.length} 个表情`}</span>{inSelectableView ? <div className="grid-actions">{checkedIds.size ? <span className="checked-caption">已选 {checkedIds.size} 项</span> : null}{library && management ? <button className="text-button" type="button" disabled={disabled} onClick={runScan}><Copy size={14} />查重扫描</button> : null}<button className="text-button" type="button" disabled={disabled || (checkedIds.size === 0 && filtered.length === 0)} onClick={exportSelection}><FolderOpen size={14} />{checkedIds.size ? '导出所选' : '导出当前列表'}</button></div> : null}</div><section className="sticker-grid" aria-label="表情列表">{visible.map(item => { const group = groupByMain.get(item.id); const isChecked = checkedIds.has(item.id); const memberItems = group ? group.memberIds.map(id => library.items.find(original => original.id === id)).filter((v): v is Sticker => !!v) : []; return <Fragment key={item.id}><div className="sticker-cell">{inSelectableView ? <input className="select-box" type="checkbox" aria-label={`选择 ${item.name}`} checked={isChecked} onChange={() => setCheckedIds(current => { const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next; })} /> : null}<button className={`sticker-card${isChecked ? ' checked' : ''}`} onClick={() => setSelected(library.items.find(original => original.id === item.id) ?? item)} aria-label={`查看 ${item.name}`}><div className="sticker-image"><StickerPreview key={`${library.root}/${item.fileName}`} src={imageUrl(library.root, item.fileName)} name={item.name} /><span className="format-badge">{item.format.toUpperCase()}</span>{group ? <span className="group-badge" title={`版本分组 ${group.memberIds.length} 项`}><Layers size={11} />{group.memberIds.length}</span> : null}</div><div className="sticker-info"><strong title={item.name}>{item.name}</strong><span>{item.sources.map(origin => SOURCE_LABELS[origin] ?? origin).join(' / ')}<span>{formatBytes(item.bytes)}</span></span></div></button>{group ? <div className="group-tray"><button className="group-expand-btn" type="button" disabled={disabled} onClick={() => setExpandedGroups(current => { const next = new Set(current); if (next.has(group.id)) next.delete(group.id); else next.add(group.id); return next; })}>{expandedGroups.has(group.id) ? '收起版本' : `展开 ${group.memberIds.length} 个版本`}</button><button className="group-disband-btn" type="button" disabled={disabled} onClick={() => void disband(group.id)}>拆分分组</button>{group.tags.length || group.collections.length ? <span className="group-meta-inline" title={`组标签：${group.tags.join('、') || '无'} · 组合集：${group.collections.join('、') || '无'}`}>{group.tags.join('、')}{group.tags.length && group.collections.length ? ' · ' : ''}{group.collections.join('、')}</span> : null}</div> : null}</div>{group && expandedGroups.has(group.id) ? <div className="group-row"><div className="group-members">{memberItems.map(member => <button className="group-member" key={member.id} onClick={() => setSelected(member)} aria-label={`查看 ${member.name}`}><StickerPreview src={imageUrl(library.root, member.fileName)} name={member.name} /><span className="pair-caption" title={member.name}>{member.name}</span></button>)}</div><GroupMetaEditor group={group} disabled={disabled} onSave={saveGroupMeta} /></div> : null}</Fragment>; })}</section><div className="pagination"><span>第 {visiblePage} / {totalPages} 页</span><button className="icon-button" aria-label="上一页" disabled={visiblePage === 1} onClick={() => setPage(visiblePage - 1)}><ChevronLeft size={20} /></button><button className="icon-button" aria-label="下一页" disabled={visiblePage === totalPages} onClick={() => setPage(visiblePage + 1)}><ChevronRight size={20} /></button></div></>}
+        {!library ? <section className="empty-state welcome"><span className="empty-icon"><Archive size={38} strokeWidth={1.4} /></span><h2>打开你的表情库</h2><p>新建或打开一个本地文件夹。</p><div className="empty-actions"><button className="button primary" disabled={disabled} onClick={() => openLibrary(true)}><FolderPlus size={18} />新建资料库</button><button className="button secondary" disabled={disabled} onClick={() => openLibrary(false)}><FolderOpen size={18} />打开已有资料库</button></div></section> : visible.length === 0 ? <section className="empty-state"><span className="empty-icon">{inEmptyTrash ? <Trash2 size={36} strokeWidth={1.4} /> : <Images size={36} strokeWidth={1.4} />}</span><h2>{emptyTitle}</h2><p>{emptyHint}</p>{isFiltering ? <button className="button secondary" onClick={() => { setQuery(''); setTag(''); setCollection(''); setSource('all'); setPage(1); }}>查看全部表情</button> : source === 'trash' || source === 'groups' ? null : <button className="button primary" disabled={disabled} onClick={importFiles}><ArrowDownToLine size={18} />导入表情</button>}</section> : <><div className="collection-caption"><span>{query ? `找到 ${filtered.length} 个表情` : `共 ${filtered.length} 个表情`}</span>{inSelectableView ? <div className="grid-actions">{checkedIds.size ? <span className="checked-caption">已选 {checkedIds.size} 项</span> : null}{library && management ? <button className="text-button" type="button" disabled={disabled} onClick={runScan}><Copy size={14} />查重扫描</button> : null}{checkedIds.size ? <button className="text-button" type="button" disabled={disabled} onClick={() => setShowBatch(open => !open)}>批量整理</button> : null}<label className="versions-check" title="导出时把所选素材所在分组的全部版本一并包括"><input type="checkbox" checked={includeVersions} onChange={event => setIncludeVersions(event.target.checked)} />含全部版本</label><button className="text-button" type="button" disabled={disabled || (checkedIds.size === 0 && filtered.length === 0)} onClick={exportSelection}><FolderOpen size={14} />{checkedIds.size ? '导出所选' : '导出当前列表'}</button></div> : null}</div>{showBatch && checkedIds.size ? <BatchPanel count={checkedIds.size} disabled={disabled} onRename={batchRenameSelected} onLabels={batchLabelsSelected} onTrash={trashSelected} onClose={() => setShowBatch(false)} /> : null}
+        <section className="sticker-grid" aria-label="表情列表">{visible.map(item => { const group = groupByMain.get(item.id); const isChecked = checkedIds.has(item.id); const memberItems = group ? group.memberIds.map(id => library.items.find(original => original.id === id)).filter((v): v is Sticker => !!v) : []; return <Fragment key={item.id}><div className="sticker-cell">{inSelectableView ? <input className="select-box" type="checkbox" aria-label={`选择 ${item.name}`} checked={isChecked} onChange={() => setCheckedIds(current => { const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next; })} /> : null}<button className={`sticker-card${isChecked ? ' checked' : ''}`} onClick={() => setSelected(library.items.find(original => original.id === item.id) ?? item)} aria-label={`查看 ${item.name}`}><div className="sticker-image"><StickerPreview key={`${library.root}/${item.fileName}`} src={imageUrl(library.root, item.fileName)} name={item.name} /><span className="format-badge">{item.format.toUpperCase()}</span>{group ? <span className="group-badge" title={`版本分组 ${group.memberIds.length} 项`}><Layers size={11} />{group.memberIds.length}</span> : null}</div><div className="sticker-info"><strong title={item.name}>{item.name}</strong><span>{item.sources.map(origin => SOURCE_LABELS[origin] ?? origin).join(' / ')}<span>{formatBytes(item.bytes)}</span></span></div></button>{group ? <div className="group-tray"><button className="group-expand-btn" type="button" disabled={disabled} onClick={() => setExpandedGroups(current => { const next = new Set(current); if (next.has(group.id)) next.delete(group.id); else next.add(group.id); return next; })}>{expandedGroups.has(group.id) ? '收起版本' : `展开 ${group.memberIds.length} 个版本`}</button><button className="group-disband-btn" type="button" disabled={disabled} onClick={() => void disband(group.id)}>拆分分组</button>{group.tags.length || group.collections.length ? <span className="group-meta-inline" title={`组标签：${group.tags.join('、') || '无'} · 组合集：${group.collections.join('、') || '无'}`}>{group.tags.join('、')}{group.tags.length && group.collections.length ? ' · ' : ''}{group.collections.join('、')}</span> : null}</div> : null}</div>{group && expandedGroups.has(group.id) ? <div className="group-row"><div className="group-members">{memberItems.map(member => <button className="group-member" key={member.id} onClick={() => setSelected(member)} aria-label={`查看 ${member.name}`}><StickerPreview src={imageUrl(library.root, member.fileName)} name={member.name} /><span className="pair-caption" title={member.name}>{member.name}</span></button>)}</div><GroupMetaEditor group={group} disabled={disabled} onSave={saveGroupMeta} /></div> : null}</Fragment>; })}</section><div className="pagination"><span>第 {visiblePage} / {totalPages} 页</span><button className="icon-button" aria-label="上一页" disabled={visiblePage === 1} onClick={() => setPage(visiblePage - 1)}><ChevronLeft size={20} /></button><button className="icon-button" aria-label="下一页" disabled={visiblePage === totalPages} onClick={() => setPage(visiblePage + 1)}><ChevronRight size={20} /></button></div></>}
         <footer className="library-footer"><Folder size={14} /><span title={library?.root}>{library?.root ?? '尚未选择资料库'}</span><span className="footer-count">{library ? `${library.items.length} 个原始素材` : '本地资料库'}</span></footer>
       </main>
       {selected && library ? <StickerDetail key={selected.id} item={selected} root={library.root} metadata={management?.metadata[selected.id]} editable={!!management && !disabled} trashed={!!management?.trash[selected.id]} trashedAt={management?.trash[selected.id]} onSave={metadata => editMetadata(selected.id, metadata)} onSetTrash={value => setItemsTrash([selected.id], value)} onClose={() => setSelected(null)} /> : null}

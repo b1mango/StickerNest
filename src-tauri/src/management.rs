@@ -278,6 +278,118 @@ impl Library {
         temp.persist(path).map_err(|e| e.to_string())?;
         Ok(())
     }
+    /// Batch rename with a prefix and a running number, in the given order.
+    /// Only visible (non-trashed) assets can be renamed; display names only.
+    pub fn batch_rename(
+        &self,
+        expected_root: &str,
+        asset_ids: Vec<String>,
+        prefix: String,
+        start: u32,
+    ) -> Result<ManagementSnapshot, String> {
+        self.check_expected_root(expected_root)?;
+        if asset_ids.is_empty() || asset_ids.len() > 2000 {
+            return Err("一次最多批量重命名 2000 个素材".into());
+        }
+        let prefix = prefix.trim().to_string();
+        if !text_valid(&prefix, 190, false) {
+            return Err("前缀为 1–190 字，不能含控制字符".into());
+        }
+        if start == 0 || start + asset_ids.len() as u32 - 1 > 999_999 {
+            return Err("起始序号需为 1–999999，且不超过范围".into());
+        }
+        let mut m = self.get_management()?;
+        let mut seen = HashSet::new();
+        for (index, id) in asset_ids.iter().enumerate() {
+            if !hash_valid(id) || !seen.insert(id) {
+                return Err("素材标识无效".into());
+            }
+            self.asset_path(id)?;
+            if m.trash.contains_key(id) {
+                return Err("回收站中的素材不能批量重命名".into());
+            }
+            let name = format!("{prefix}-{:03}", start + index as u32);
+            let mut meta = m.metadata.get(id).cloned().unwrap_or_default();
+            meta.name = name;
+            m.metadata.insert(id.clone(), meta);
+        }
+        self.write_management(&m)?;
+        Ok(m)
+    }
+    /// Add and/or remove tags and collections in batch, keeping per-asset names.
+    pub fn batch_labels(
+        &self,
+        expected_root: &str,
+        asset_ids: Vec<String>,
+        add_tags: Vec<String>,
+        remove_tags: Vec<String>,
+        add_collections: Vec<String>,
+        remove_collections: Vec<String>,
+    ) -> Result<ManagementSnapshot, String> {
+        self.check_expected_root(expected_root)?;
+        if asset_ids.is_empty() || asset_ids.len() > 2000 {
+            return Err("一次最多批量处理 2000 个素材".into());
+        }
+        let normalize = |list: Vec<String>, field: &str| -> Result<Vec<String>, String> {
+            let mut seen = HashSet::new();
+            let values: Vec<String> = list
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && seen.insert(s.clone()))
+                .collect();
+            if values.len() > 50 || !values.iter().all(|v| text_valid(v, 50, false)) {
+                return Err(format!("{field}最多 50 个、每项 50 字，不能含控制字符"));
+            }
+            Ok(values)
+        };
+        let add_tags = normalize(add_tags, "标签")?;
+        let remove_tags = normalize(remove_tags, "标签")?;
+        let add_collections = normalize(add_collections, "合集")?;
+        let remove_collections = normalize(remove_collections, "合集")?;
+        if add_tags.is_empty() && remove_tags.is_empty()
+            && add_collections.is_empty() && remove_collections.is_empty()
+        {
+            return Err("请至少填写一个要添加或移除的标签或合集".into());
+        }
+        let mut m = self.get_management()?;
+        let limit_lists = |meta: &mut AssetMetadata| -> Result<(), String> {
+            if meta.tags.len() > 50 || meta.collections.len() > 50 {
+                return Err("单个素材的标签或合集最多 50 个".into());
+            }
+            Ok(())
+        };
+        let mut seen = HashSet::new();
+        for id in &asset_ids {
+            if !hash_valid(id) || !seen.insert(id) {
+                return Err("素材标识无效".into());
+            }
+            self.asset_path(id)?;
+            if m.trash.contains_key(id) {
+                return Err("回收站中的素材不能批量整理".into());
+            }
+            let mut meta = m.metadata.get(id).cloned().unwrap_or_default();
+            for tag in &add_tags {
+                if !meta.tags.contains(tag) {
+                    meta.tags.push(tag.clone());
+                }
+            }
+            meta.tags.retain(|t| !remove_tags.contains(t));
+            for collection in &add_collections {
+                if !meta.collections.contains(collection) {
+                    meta.collections.push(collection.clone());
+                }
+            }
+            meta.collections.retain(|c| !remove_collections.contains(c));
+            limit_lists(&mut meta)?;
+            if meta.name.is_empty() && meta.tags.is_empty() && meta.collections.is_empty() {
+                m.metadata.remove(id);
+            } else {
+                m.metadata.insert(id.clone(), meta);
+            }
+        }
+        self.write_management(&m)?;
+        Ok(m)
+    }
     pub fn save_metadata(
         &self,
         expected_root: &str,
@@ -941,6 +1053,81 @@ mod tests {
             .save_group_metadata(&root, &group_id, vec!["bad\u{202E}tag".into()], vec![])
             .is_err());
         let _ = dir;
+    }
+    #[test]
+    fn batch_rename_orders_numbers_and_skips_nothing_silently() {
+        let (dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        let m = lib
+            .batch_rename(&root, vec![ids[1].clone(), ids[0].clone()], "表情".into(), 5)
+            .unwrap();
+        assert_eq!(m.metadata[&ids[1]].name, "表情-005");
+        assert_eq!(m.metadata[&ids[0]].name, "表情-006");
+        // Re-running renames again in the same order (idempotent semantics).
+        let m = lib
+            .batch_rename(&root, vec![ids[0].clone()], "图".into(), 1)
+            .unwrap();
+        assert_eq!(m.metadata[&ids[0]].name, "图-001");
+        drop(lib);
+        let _ = dir;
+    }
+    #[test]
+    fn batch_rename_validates_prefix_range_and_trash() {
+        let (_dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        assert!(lib.batch_rename(&root, ids.clone(), "".into(), 1).is_err());
+        assert!(lib.batch_rename(&root, ids.clone(), "  ".into(), 1).is_err());
+        assert!(lib.batch_rename(&root, ids.clone(), "好".into(), 0).is_err());
+        assert!(lib.batch_rename(&root, ids.clone(), "bad\u{202E}".into(), 1).is_err());
+        lib.set_trash(&root, vec![ids[0].clone()], true).unwrap();
+        assert!(lib.batch_rename(&root, ids.clone(), "好".into(), 1).is_err());
+        assert!(lib.batch_rename(&root, vec![], "好".into(), 1).is_err());
+    }
+    #[test]
+    fn batch_labels_adds_removes_and_keeps_member_names() {
+        let (dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        lib.save_metadata(&root, ids[0].clone(), "已有名".into(), vec!["旧".into()], vec![])
+            .unwrap();
+        let m = lib
+            .batch_labels(
+                &root,
+                ids.clone(),
+                vec!["新".into(), "新".into()],
+                vec!["旧".into()],
+                vec!["合A".into()],
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(m.metadata[&ids[0]].name, "已有名");
+        assert_eq!(m.metadata[&ids[0]].tags, vec!["新"]);
+        assert_eq!(m.metadata[&ids[0]].collections, vec!["合A"]);
+        assert_eq!(m.metadata[&ids[1]].tags, vec!["新"]);
+        // Removing everything from an otherwise empty record drops it.
+        let m = lib
+            .batch_labels(&root, vec![ids[1].clone()], vec![], vec!["新".into()], vec![], vec!["合A".into()])
+            .unwrap();
+        assert!(!m.metadata.contains_key(&ids[1]));
+        drop(lib);
+        let _ = dir;
+    }
+    #[test]
+    fn batch_labels_rejects_empty_operations_and_bad_input() {
+        let (_dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        assert!(lib
+            .batch_labels(&root, ids.clone(), vec![], vec![], vec![], vec![])
+            .is_err());
+        assert!(lib
+            .batch_labels(&root, vec![], vec!["a".into()], vec![], vec![], vec![])
+            .is_err());
+        assert!(lib
+            .batch_labels(&root, ids.clone(), vec!["a\u{200B}".into()], vec![], vec![], vec![])
+            .is_err());
+        lib.set_trash(&root, vec![ids[0].clone()], true).unwrap();
+        assert!(lib
+            .batch_labels(&root, ids.clone(), vec!["a".into()], vec![], vec![], vec![])
+            .is_err());
     }
     #[cfg(unix)]
     #[test]

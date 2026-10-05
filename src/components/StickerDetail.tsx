@@ -31,11 +31,19 @@ export function StickerDetail({ item, root, metadata, editable, trashed, trashed
   async function save() {
     if (savingRef.current || !editable) return;
     if (!name.trim()) { setError('请填写表情名称。'); return; }
+    await saveWith(name, tags, collections);
+  }
+  async function saveWith(nameValue: string, tagsValue: string, collectionsValue: string) {
     savingRef.current = true; setSaving(true); setError('');
     const split = (value: string) => [...new Set(value.split(/[,，]/).map(value => value.trim()).filter(Boolean))];
-    try { await onSave({ name: name.trim(), tags: split(tags), collections: split(collections) }); setEditing(false); }
+    // An empty name falls back to the manifest file name (reset to default).
+    try { await onSave({ name: nameValue.trim(), tags: split(tagsValue), collections: split(collectionsValue) }); setEditing(false); }
     catch (reason) { setError(String(reason)); }
     finally { savingRef.current = false; setSaving(false); }
+  }
+  async function resetToDefaultName() {
+    if (savingRef.current || !editable) return;
+    await saveWith('', tags, collections);
   }
   async function setTrashState(value: boolean) {
     if (trashingRef.current) return;
@@ -67,7 +75,7 @@ export function StickerDetail({ item, root, metadata, editable, trashed, trashed
           <label className="field-label">合集<input value={collections} disabled={saving} placeholder="例如：日常回复，工作群" onChange={event => setCollections(event.target.value)} /></label>
           <p className="field-hint">多个标签或合集用逗号分隔。</p>
           {error ? <p className="field-error" role="alert">{error}</p> : null}
-          <div className="editor-actions"><button className="button primary" disabled={saving || !name.trim()} type="submit">{saving ? '正在保存…' : '保存整理'}</button><button className="button secondary" type="button" disabled={saving} onClick={cancelEditing}>取消</button></div>
+          <div className="editor-actions"><button className="button primary" disabled={saving || !name.trim()} type="submit">{saving ? '正在保存…' : '保存整理'}</button><button className="button secondary" type="button" disabled={saving} onClick={cancelEditing}>取消</button>{metadata?.name ? <button className="text-button" type="button" disabled={saving} onClick={() => void resetToDefaultName()}>恢复默认名</button> : null}</div>
         </form> : <div className="detail-organization"><p>标签：{metadata?.tags.join('、') || '未添加'}</p><p>合集：{metadata?.collections.join('、') || '未加入'}</p><div className="organization-actions"><button className="text-button" disabled={!editable} onClick={startEditing}>编辑名称、标签与合集</button>{!trashed && !confirmingTrash ? <button className="text-button danger-link" disabled={!editable || trashing} onClick={() => { setConfirmingTrash(true); setError(''); }}>移入回收站</button> : null}</div>
           {trashed ? <div className="trash-notice" role="status"><p>已移入回收站{trashedAt ? `（${new Date(trashedAt * 1000).toLocaleString('zh-CN')}）` : ''}，文件仍保留在本地。</p><button className="button secondary" disabled={!editable || trashing} onClick={() => void setTrashState(false)}>{trashing ? '正在恢复…' : '恢复素材'}</button></div> : null}
           {confirmingTrash ? <div className="trash-notice" role="alert"><p>移入回收站后不再显示在列表中；文件保留在本地，可随时恢复。</p>{error ? <p className="field-error" role="alert">{error}</p> : null}<div className="editor-actions"><button className="button danger" disabled={trashing} onClick={() => void setTrashState(true)}>{trashing ? '正在移入…' : '确认移入'}</button><button className="button secondary" disabled={trashing} onClick={() => setConfirmingTrash(false)}>取消</button></div></div> : null}

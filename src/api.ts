@@ -79,6 +79,14 @@ export async function saveGroupMetadata(expectedRoot: string, groupId: string, t
   return invoke('save_group_metadata', { expectedRoot, groupId, tags, collections });
 }
 
+export async function batchRename(expectedRoot: string, assetIds: string[], prefix: string, start: number): Promise<import('./types').ManagementSnapshot> {
+  return invoke('batch_rename', { expectedRoot, assetIds, prefix, start });
+}
+
+export async function batchLabels(expectedRoot: string, assetIds: string[], addTags: string[], removeTags: string[], addCollections: string[], removeCollections: string[]): Promise<import('./types').ManagementSnapshot> {
+  return invoke('batch_labels', { expectedRoot, assetIds, addTags, removeTags, addCollections, removeCollections });
+}
+
 export async function ignorePair(expectedRoot: string, assetA: string, assetB: string): Promise<import('./types').ManagementSnapshot> {
   return invoke('ignore_pair', { expectedRoot, assetA, assetB });
 }

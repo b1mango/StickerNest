@@ -134,6 +134,42 @@ fn save_metadata(
     )
 }
 #[tauri::command]
+fn batch_rename(
+    state: State<'_, LibraryState>,
+    expected_root: String,
+    asset_ids: Vec<String>,
+    prefix: String,
+    start: u32,
+) -> Result<ManagementSnapshot, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    current.as_ref().ok_or("请先打开资料库")?.batch_rename(
+        &expected_root,
+        asset_ids,
+        prefix,
+        start,
+    )
+}
+#[tauri::command]
+fn batch_labels(
+    state: State<'_, LibraryState>,
+    expected_root: String,
+    asset_ids: Vec<String>,
+    add_tags: Vec<String>,
+    remove_tags: Vec<String>,
+    add_collections: Vec<String>,
+    remove_collections: Vec<String>,
+) -> Result<ManagementSnapshot, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    current.as_ref().ok_or("请先打开资料库")?.batch_labels(
+        &expected_root,
+        asset_ids,
+        add_tags,
+        remove_tags,
+        add_collections,
+        remove_collections,
+    )
+}
+#[tauri::command]
 fn import_provenance(
     state: State<'_, LibraryState>,
     expected_root: String,
@@ -285,6 +321,8 @@ pub fn run() {
             get_management,
             save_metadata,
             import_provenance,
+            batch_rename,
+            batch_labels,
             set_trash,
             backup_library,
             restore_backup,
