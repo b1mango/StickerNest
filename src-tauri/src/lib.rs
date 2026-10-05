@@ -176,6 +176,7 @@ fn import_provenance(
     path: String,
     account_alias: String,
     account_id: Option<String>,
+    platform: Option<String>,
 ) -> Result<ManagementSnapshot, String> {
     let current = state.0.lock().map_err(|_| "资料库忙")?;
     current.as_ref().ok_or("请先打开资料库")?.import_provenance(
@@ -183,6 +184,7 @@ fn import_provenance(
         &PathBuf::from(path),
         account_alias,
         account_id,
+        platform,
     )
 }
 #[tauri::command]
@@ -364,6 +366,43 @@ struct CollectImportResponse {
 }
 
 #[tauri::command]
+async fn import_wechat_manifest(
+    app: tauri::AppHandle,
+    manifest_path: String,
+) -> Result<backup::CollectStageResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<LibraryState>();
+        let current = state.0.lock().map_err(|_| "资料库忙，请稍后再试")?;
+        let scripts = scripts_dir();
+        current
+            .as_ref()
+            .ok_or("请先打开资料库")?
+            .import_wechat_manifest(&scripts, Path::new(&manifest_path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn collect_wechat_import(app: tauri::AppHandle) -> Result<CollectImportResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<LibraryState>();
+        let mut current = state.0.lock().map_err(|_| "资料库忙，请稍后再试")?;
+        let library = current.as_mut().ok_or("请先打开资料库")?;
+        let (report, report_path) = library.collect_wechat_import()?;
+        let preview_warnings = authorize_assets(&app, library);
+        Ok(CollectImportResponse {
+            snapshot: library.snapshot(),
+            report,
+            preview_warnings,
+            report_path: report_path.to_string_lossy().into_owned(),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn export_assets(
     state: State<'_, LibraryState>,
     expected_root: String,
@@ -400,7 +439,9 @@ pub fn run() {
             ignore_pair,
             export_assets,
             collect_douyin_fetch,
-            collect_douyin_import
+            collect_douyin_import,
+            import_wechat_manifest,
+            collect_wechat_import
         ])
         .run(tauri::generate_context!())
         .expect("无法启动拾趣桌面应用");

@@ -167,7 +167,7 @@ impl Library {
         let mut accounts = HashSet::new();
         for a in &m.accounts {
             if !hash_valid(&a.id)
-                || a.platform != "抖音"
+                || !matches!(a.platform.as_str(), "抖音" | "微信")
                 || !text_valid(&a.alias, 80, false)
                 || !accounts.insert(a.id.as_str())
             {
@@ -610,8 +610,14 @@ impl Library {
         path: &Path,
         alias: String,
         account_id: Option<String>,
+        platform: Option<String>,
     ) -> Result<ManagementSnapshot, String> {
         self.check_expected_root(expected_root)?;
+        let platform = match platform.as_deref() {
+            None | Some("抖音") => "抖音",
+            Some("微信") => "微信",
+            _ => return Err("平台必须为抖音或微信".into()),
+        };
         let mut m = self.get_management()?;
         let bytes = read_file(path)?;
         let report: Report =
@@ -628,7 +634,7 @@ impl Library {
             if !m
                 .accounts
                 .iter()
-                .any(|a| a.id == id && a.platform == "抖音")
+                .any(|a| a.id == id && a.platform == platform)
             {
                 return Err("所选账号不存在".into());
             }
@@ -652,7 +658,7 @@ impl Library {
             let id = digest(seed.as_bytes());
             m.accounts.push(Account {
                 id: id.clone(),
-                platform: "抖音".into(),
+                platform: platform.to_string(),
                 alias,
             });
             id
@@ -810,7 +816,7 @@ mod tests {
             ]
         })).unwrap()).unwrap();
         let management = lib
-            .import_provenance(&lib.snapshot().root, &path, "部分采集测试".into(), None)
+            .import_provenance(&lib.snapshot().root, &path, "部分采集测试".into(), None, None)
             .unwrap();
         assert_eq!(management.references.len(), 1);
         assert_eq!(management.batches.len(), 1);
@@ -836,6 +842,34 @@ mod tests {
         assert_eq!(fs::read(p).unwrap(), b"broken");
     }
     #[test]
+    fn wechat_platform_accounts_are_separate_from_douyin() {
+        let (dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        let p = dir.path().join("report.json");
+        report(&p, &ids[0]);
+        // A WeChat account is created with the same report, stored separately.
+        let m = lib
+            .import_provenance(&root, &p, "微信大号".into(), None, Some("微信".into()))
+            .unwrap();
+        assert_eq!(m.accounts.len(), 1);
+        assert_eq!(m.accounts[0].platform, "微信");
+        // Douyin account must not be confused with WeChat alias.
+        let m = lib
+            .import_provenance(&root, &p, "测试账号".into(), None, None)
+            .unwrap();
+        assert_eq!(m.accounts.len(), 2);
+        // Reload persists both platforms.
+        drop(lib);
+        let reopened = Library::open(Path::new(&root)).unwrap();
+        let m = reopened.get_management().unwrap();
+        assert_eq!(m.accounts.len(), 2);
+        assert!(m.accounts.iter().any(|a| a.platform == "微信"));
+        assert!(reopened
+            .import_provenance(&root, &p, "X".into(), None, Some("qq".into()))
+            .is_err());
+        let _ = dir;
+    }
+    #[test]
     fn pending_inspection_rows_count_as_failures_not_errors() {
         let (dir, lib, ids) = fixture();
         let root = lib.snapshot().root;
@@ -848,7 +882,7 @@ mod tests {
             ]
         })).unwrap()).unwrap();
         let m = lib
-            .import_provenance(&root, &path, "测试账号".into(), None)
+            .import_provenance(&root, &path, "测试账号".into(), None, None)
             .unwrap();
         assert_eq!(m.references.len(), 1);
         let batch = &m.batches[0];
@@ -861,21 +895,21 @@ mod tests {
         let p = dir.path().join("report.json");
         report(&p, &ids[0]);
         let m = lib
-            .import_provenance(&root, &p, "测试账号".into(), None)
+            .import_provenance(&root, &p, "测试账号".into(), None, None)
             .unwrap();
         assert_eq!(m.references.len(), 2);
         let account = m.accounts[0].id.clone();
         assert!(lib
-            .import_provenance(&root, &p, "测试账号".into(), None)
+            .import_provenance(&root, &p, "测试账号".into(), None, None)
             .is_err());
         let m = lib
-            .import_provenance(&root, &p, "".into(), Some(account.clone()))
+            .import_provenance(&root, &p, "".into(), Some(account.clone()), None)
             .unwrap();
         assert_eq!(m.references.len(), 2);
         assert_eq!(m.batches.len(), 1);
         report(&p, &ids[1]);
         let m = lib
-            .import_provenance(&root, &p, "".into(), Some(account))
+            .import_provenance(&root, &p, "".into(), Some(account), None)
             .unwrap();
         assert_eq!(m.references.len(), 4);
         assert_eq!(m.batches.len(), 2);
@@ -892,18 +926,18 @@ mod tests {
             ]
         })).unwrap()).unwrap();
         let first = lib
-            .import_provenance(&root, &partial, "测试".into(), None)
+            .import_provenance(&root, &partial, "测试".into(), None, None)
             .unwrap();
         let account = first.accounts[0].id.clone();
         let batch_id = first.batches[0].id.clone();
         let complete = dir.path().join("complete.json");
         report(&complete, &ids[0]);
         let second = lib
-            .import_provenance(&root, &complete, "".into(), Some(account.clone()))
+            .import_provenance(&root, &complete, "".into(), Some(account.clone()), None)
             .unwrap();
         assert_eq!(second.batches.last().unwrap().failed_resources, 0);
         let repeated = lib
-            .import_provenance(&root, &partial, "".into(), Some(account))
+            .import_provenance(&root, &partial, "".into(), Some(account), None)
             .unwrap();
         assert_eq!(repeated.references.len(), second.references.len());
         assert_eq!(repeated.batches.len(), 2);
@@ -919,7 +953,7 @@ mod tests {
         let p = dir.path().join("report.json");
         report(&p, &"e".repeat(64));
         assert!(lib
-            .import_provenance(&lib.snapshot().root, &p, "测试".into(), None)
+            .import_provenance(&lib.snapshot().root, &p, "测试".into(), None, None)
             .is_err());
         assert!(!lib.management_path().exists());
     }
@@ -970,7 +1004,7 @@ mod tests {
         let p = dir.path().join("report.json");
         report(&p, &ids[0]);
         let m = lib
-            .import_provenance(&root, &p, "测试账号".into(), None)
+            .import_provenance(&root, &p, "测试账号".into(), None, None)
             .unwrap();
         assert_eq!(m.references.len(), 2);
         assert_eq!(m.trash.len(), 1);
@@ -1163,7 +1197,7 @@ mod tests {
         let linked = dir.path().join("linked.json");
         symlink(&p, &linked).unwrap();
         assert!(lib
-            .import_provenance(&lib.snapshot().root, &linked, "测试".into(), None)
+            .import_provenance(&lib.snapshot().root, &linked, "测试".into(), None, None)
             .is_err());
     }
 }

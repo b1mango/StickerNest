@@ -66,6 +66,7 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         &PathBuf::from(report),
         alias,
         account_id,
+        None,
     )?;
     let account = after
         .accounts

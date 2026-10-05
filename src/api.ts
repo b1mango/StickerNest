@@ -38,7 +38,7 @@ export async function saveMetadata(expectedRoot: string, assetId: string, metada
 export async function importProvenance(expectedRoot: string, accountAlias: string, accountId: string | null): Promise<import('./types').ManagementSnapshot | null> {
   const path = await open({ multiple: false, directory: false, title: '选择抖音本地采集报告', filters: [{ name: '采集报告', extensions: ['json'] }] });
   if (!path) return null;
-  return invoke('import_provenance', { expectedRoot, path, accountAlias, accountId });
+  return invoke('import_provenance', { expectedRoot, path, accountAlias, accountId, platform: null });
 }
 
 export async function setTrash(expectedRoot: string, assetIds: string[], trashed: boolean): Promise<import('./types').ManagementSnapshot> {
@@ -95,8 +95,16 @@ export async function collectDouyinImport(): Promise<{ snapshot: Snapshot; repor
   return invoke('collect_douyin_import');
 }
 
-export async function importProvenanceAtPath(expectedRoot: string, path: string, accountAlias: string, accountId: string | null): Promise<import('./types').ManagementSnapshot> {
-  return invoke('import_provenance', { expectedRoot, path, accountAlias, accountId });
+export async function importProvenanceAtPath(expectedRoot: string, path: string, accountAlias: string, accountId: string | null, platform?: string): Promise<import('./types').ManagementSnapshot> {
+  return invoke('import_provenance', { expectedRoot, path, accountAlias, accountId, platform: platform ?? null });
+}
+
+export async function importWechatManifest(manifestPath: string): Promise<{ stage: string; detail: string }> {
+  return invoke('import_wechat_manifest', { manifestPath });
+}
+
+export async function collectWechatImport(): Promise<{ snapshot: Snapshot; report: ImportReport; previewWarnings: string[]; reportPath: string }> {
+  return invoke('collect_wechat_import');
 }
 
 export async function ignorePair(expectedRoot: string, assetA: string, assetB: string): Promise<import('./types').ManagementSnapshot> {

@@ -8,6 +8,7 @@ import { ManagementPanel } from './components/ManagementPanel';
 import { DuplicateReview } from './components/DuplicateReview';
 import { BatchPanel } from './components/BatchPanel';
 import { CollectDialog } from './components/CollectDialog';
+import { WeChatImportDialog } from './components/WeChatImportDialog';
 import './styles.css';
 
 const PAGE_SIZE = 60;
@@ -85,6 +86,7 @@ export default function App() {
   const [showBatch, setShowBatch] = useState(false);
   const [includeVersions, setIncludeVersions] = useState(false);
   const [showCollect, setShowCollect] = useState(false);
+  const [showWechat, setShowWechat] = useState(false);
   const locked = useRef(false);
 
   useEffect(() => {
@@ -334,6 +336,7 @@ export default function App() {
           <div className="sidebar-actions">
             <button className="button secondary full-width" disabled={disabled} onClick={() => openLibrary(false)}><FolderOpen size={16} />打开资料库</button>
             {library ? <button className="button secondary full-width" disabled={disabled} onClick={() => setShowCollect(true)}><Music2 size={16} />采集抖音收藏</button> : null}
+            {library ? <button className="button secondary full-width" disabled={disabled} onClick={() => setShowWechat(true)}><MessageCircle size={16} />导入微信清单</button> : null}
             {library ? <button className="button secondary full-width" disabled={disabled} onClick={backupCurrentLibrary}><HardDriveDownload size={16} />备份资料库</button> : null}
           </div>
           <div className="sidebar-links">
@@ -368,6 +371,7 @@ export default function App() {
       {selected && library ? <StickerDetail key={selected.id} item={selected} root={library.root} metadata={management?.metadata[selected.id]} editable={!!management && !disabled} trashed={!!management?.trash[selected.id]} trashedAt={management?.trash[selected.id]} onSave={metadata => editMetadata(selected.id, metadata)} onSetTrash={value => setItemsTrash([selected.id], value)} onClose={() => setSelected(null)} /> : null}
       {showDuplicates && scanReport && library && management ? <DuplicateReview report={scanReport} items={library.items} root={library.root} existingGroups={management.groups} onKeep={keepOneAsset} onIgnorePair={ignoreSimilarPair} onRescan={async () => setScanReport(await scanDuplicates())} onClose={() => setShowDuplicates(false)} /> : null}
       {showCollect && library && management ? <CollectDialog root={library.root} accounts={management.accounts.filter(a => a.platform === '抖音')} onSnapshot={(snapshot, warning) => { setLibrary(snapshot); setPage(1); if (warning) setPreviewWarning(warning); }} onManagement={setManagement} onError={setError} onClose={() => setShowCollect(false)} /> : null}
+      {showWechat && library && management ? <WeChatImportDialog root={library.root} accounts={management.accounts.filter(a => a.platform === '微信')} onSnapshot={(snapshot, warning) => { setLibrary(snapshot); setPage(1); if (warning) setPreviewWarning(warning); }} onManagement={setManagement} onError={setError} onClose={() => setShowWechat(false)} /> : null}
     </div>
   );
 }

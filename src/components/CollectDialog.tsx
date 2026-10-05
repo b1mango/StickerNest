@@ -30,6 +30,7 @@ export function CollectDialog({ root, accounts, onSnapshot, onManagement, onErro
   const dialog = useRef<HTMLDialogElement>(null);
   const mounted = useRef(true);
   useEffect(() => {
+    mounted.current = true;
     const trigger = document.activeElement as HTMLElement | null;
     dialog.current?.showModal();
     return () => { mounted.current = false; dialog.current?.close(); trigger?.focus(); };

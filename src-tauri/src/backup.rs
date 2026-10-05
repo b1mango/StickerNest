@@ -539,6 +539,93 @@ impl Library {
         })
     }
 
+    /// Stage 1 of WeChat manifest download: plain URL list from wxemoticon,
+    /// staged under downloads/wechat/ so it never collides with Douyin data.
+    pub fn import_wechat_manifest(
+        &self,
+        scripts_dir: &Path,
+        manifest_path: &Path,
+    ) -> Result<CollectStageResult, String> {
+        if !manifest_path.is_file() {
+            return Err("清单文件不存在，请选择 wxemoticon 导出的 emoticon_urls.txt".into());
+        }
+        let downloader = scripts_dir.join("download_wechat.py");
+        if !downloader.is_file() {
+            return Err(format!(
+                "缺少下载脚本 download_wechat.py（搜索位置：{}）。请用 npm run desktop 从项目目录启动应用。",
+                scripts_dir.display()
+            ));
+        }
+        let downloads = PathBuf::from(self.snapshot().root).join("downloads").join("wechat");
+        fs::create_dir_all(&downloads).map_err(|e| format!("无法创建下载目录：{e}"))?;
+        let manifest_dest = downloads.join("manifest.txt");
+        fs::copy(manifest_path, &manifest_dest)
+            .map_err(|e| format!("无法保存清单副本：{e}"))?;
+        let output = std::process::Command::new("python3")
+            .arg(&downloader)
+            .arg(&manifest_dest)
+            .arg(&downloads)
+            .output()
+            .map_err(|e| format!("无法启动 python3:{e}"))?;
+        // exit 2 = partial failure: still acceptable when something downloaded.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let summary: serde_json::Value = serde_json::from_str(stdout.trim().lines().last().unwrap_or(""))
+            .map_err(|_| format!("清单下载脚本输出无法解析：{}", stdout.trim().chars().take(400).collect::<String>()))?;
+        let verified = summary["verified"].as_u64().unwrap_or(0);
+        if verified == 0 {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = format!("{}\n{}", stderr.trim(), stdout.trim());
+            return Err(format!("清单全部下载失败：{}", detail.chars().take(600).collect::<String>()));
+        }
+        Ok(CollectStageResult {
+            stage: "fetch".into(),
+            detail: format!(
+                "清单 {} 项 · 下载成功 {} · 失败 {}（原件保存在库内 downloads/wechat)",
+                summary["total"], summary["verified"], summary["failed"]
+            ),
+        })
+    }
+
+    /// Stage 2 of WeChat import: originals referenced by the staged report
+    /// (verified items only), source "微信". Returns the report for mapping.
+    pub fn collect_wechat_import(&mut self) -> Result<(crate::library::ImportReport, PathBuf), String> {
+        let wechat = PathBuf::from(self.snapshot().root)
+            .join("downloads")
+            .join("wechat");
+        let report_path = wechat.join("report.json");
+        #[derive(serde::Deserialize)]
+        struct StagedReport {
+            items: Vec<StagedItem>,
+        }
+        #[derive(serde::Deserialize)]
+        struct StagedItem {
+            status: String,
+            #[serde(default)]
+            sha256: Option<String>,
+            #[serde(default)]
+            format: Option<String>,
+        }
+        let staged_bytes = fs::read(&report_path)
+            .map_err(|e| format!("请先完成清单下载:{e}"))?;
+        let staged: StagedReport = serde_json::from_slice(&staged_bytes)
+            .map_err(|e| format!("下载报告无法解析:{e}"))?;
+        let mut paths: Vec<PathBuf> = staged
+            .items
+            .iter()
+            .filter(|item| item.status == "verified")
+            .filter_map(|item| match (&item.sha256, &item.format) {
+                (Some(sha), Some(fmt)) => Some(wechat.join("originals").join(format!("{sha}.{fmt}"))),
+                _ => None,
+            })
+            .collect();
+        if paths.is_empty() {
+            return Err("清单中没有下载成功的原件".into());
+        }
+        paths.sort();
+        let report = self.import_files(paths, "微信".into())?;
+        Ok((report, report_path))
+    }
+
     /// Stage 2: import the staged originals and return the report path for
     /// account mapping (import_provenance handles the account step in the UI).
     pub fn collect_douyin_import(&mut self) -> Result<(crate::library::ImportReport, PathBuf), String> {
@@ -560,6 +647,7 @@ impl Library {
 
 #[cfg(test)]
 mod tests {
+    static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use super::*;
     fn fixture() -> (tempfile::TempDir, Library, Vec<String>) {
         let dir = tempfile::tempdir().unwrap();
@@ -790,6 +878,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn collect_pipeline_runs_collector_then_downloader() {
+        let _path_guard = PATH_LOCK.lock().unwrap();
         use std::os::unix::fs::PermissionsExt;
         // Shim "node" records the invocation and writes a two-sticker list.
         let (dir, mut lib, _ids) = fixture();
@@ -805,7 +894,7 @@ mod tests {
         let python_shim = shim.join("python3");
         fs::write(
             &python_shim,
-            "#!/bin/sh\ndest=\"$2\"\nmkdir -p \"$dest/originals\"\npython3 - \"$dest\" <<'PY2' 2>/dev/null || true\nPY2\nexit 0\n",
+            "#!/bin/sh\ndest=\"$3\"\nmkdir -p \"$dest/originals\"\npython3 - \"$dest\" <<'PY2' 2>/dev/null || true\nPY2\nexit 0\n",
         )
         .unwrap();
         let mut permissions = fs::metadata(&node_shim).unwrap().permissions();
@@ -815,7 +904,7 @@ mod tests {
         // python shim needs to actually create originals; use printf-based png.
         fs::write(
             &python_shim,
-            "#!/bin/sh\ndest=\"$2\"\nmkdir -p \"$dest/originals\"\ntouch \"$dest/report.json\"\nexit 0\n",
+            "#!/bin/sh\ndest=\"$3\"\nmkdir -p \"$dest/originals\"\ntouch \"$dest/report.json\"\nexit 0\n",
         )
         .unwrap();
         fs::set_permissions(&python_shim, fs::metadata(&node_shim).unwrap().permissions()).unwrap();
@@ -832,6 +921,147 @@ mod tests {
         assert!(result.detail.contains("2 项"));
         assert!(root.join("downloads/stickers.json").exists());
     }
+    #[test]
+    fn wechat_manifest_downloads_and_imports_with_account_mapping() {
+        let _path_guard = PATH_LOCK.lock().unwrap();
+        // Shim python3 that decodes nothing but stages two tiny PNG originals.
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, lib, _ids) = fixture();
+        let root = PathBuf::from(lib.snapshot().root);
+        let shim = dir.path().join("shim");
+        fs::create_dir(&shim).unwrap();
+        let downloader = shim.join("python3");
+        let shim_script = format!(
+            "#!/bin/sh\ndest=\"$3\"\nmkdir -p \"$dest/originals\"\ncp '{src}/a.png' \"$dest/originals/$(/usr/bin/shasum -a 256 '{src}/a.png' | cut -c1-64).png\"\ncp '{src}/b.png' \"$dest/originals/$(/usr/bin/shasum -a 256 '{src}/b.png' | cut -c1-64).png\"\ncp '{src}/report.json' \"$dest/report.json\"\nprintf '{{\"total\":2,\"verified\":2,\"failed\":0,\"skipped\":0}}'\n\nexit 0\n",
+            src = shim.display()
+        );
+        fs::write(&downloader, shim_script)
+        .unwrap();
+        let mut permissions = fs::metadata(&downloader).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&downloader, permissions).unwrap();
+        // Stage fixture assets for the shim to copy.
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 8, 7, 255]))
+            .save(shim.join("a.png"))
+            .unwrap();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]))
+            .save(shim.join("b.png"))
+            .unwrap();
+        let shim_report = shim.join("report.json");
+        let hash_a = {
+            let data = fs::read(shim.join("a.png")).unwrap();
+            format!("{:x}", sha2::Sha256::digest(&data))
+        };
+        fs::write(&shim_report, serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1, "expected_items": 2, "items": [
+                {"id": "1", "status": "verified", "url": "https://mmbiz.qpic.cn/a", "sha256": hash_a, "format": "png", "resource_identity": "b".repeat(64)},
+                {"id": "2", "status": "pending_inspection", "resource_identity": "c".repeat(64)}
+            ]
+        })).unwrap()).unwrap();
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", shim.display(), old_path));
+        let scripts = dir.path().join("scripts");
+        fs::create_dir(&scripts).unwrap();
+        fs::write(scripts.join("download_wechat.py"), "# shim\n").unwrap();
+        let manifest = dir.path().join("emoticon_urls.txt");
+        fs::write(&manifest, "https://mmbiz.qpic.cn/a
+https://mmbiz.qpic.cn/b
+").unwrap();
+        let staged = lib.import_wechat_manifest(&scripts, &manifest);
+        std::env::set_var("PATH", old_path);
+        let staged = staged.unwrap();
+        assert!(staged.detail.contains("下载成功 2"));
+        // Import + map to a WeChat account.
+        let mut lib = lib;
+        let (report, report_path) = lib.collect_wechat_import().unwrap();
+        // The staged report marks one item verified and one pending;
+        // only the verified original enters the library.
+        assert_eq!(report.added, 1);
+        let accounts_before = lib.get_management().unwrap().accounts.len();
+        let management = lib
+            .import_provenance(&lib.snapshot().root, &report_path, "微信大号".into(), None, Some("微信".into()))
+            .unwrap();
+        assert_eq!(management.accounts.len(), accounts_before + 1);
+        assert_eq!(management.accounts.last().unwrap().platform, "微信");
+        assert_eq!(management.references.len(), 1);
+        assert!(root.join("downloads/wechat/originals").exists());
+    }
+    #[test]
+    fn wechat_manifest_partial_failure_still_proceeds() {
+        let _path_guard = PATH_LOCK.lock().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, lib, _ids) = fixture();
+        let shim = dir.path().join("shim");
+        fs::create_dir(&shim).unwrap();
+        let downloader = shim.join("python3");
+        let shim_script = format!(
+            "#!/bin/sh\ndest=\"$3\"\nmkdir -p \"$dest/originals\"\ncp '{src}/a.png' \"$dest/originals/a.png\"\nprintf '{{\"total\":3,\"verified\":1,\"failed\":2,\"skipped\":0}}'\necho 'failed items' >&2\nexit 2\n",
+            src = shim.display()
+        );
+        fs::write(&downloader, shim_script).unwrap();
+        let mut permissions = fs::metadata(&downloader).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&downloader, permissions).unwrap();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 1, 1, 255]))
+            .save(shim.join("a.png"))
+            .unwrap();
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", shim.display(), old_path));
+        let scripts = dir.path().join("scripts");
+        fs::create_dir(&scripts).unwrap();
+        fs::write(scripts.join("download_wechat.py"), "# shim\n").unwrap();
+        let manifest = dir.path().join("urls.txt");
+        fs::write(&manifest, "https://mmbiz.qpic.cn/a
+").unwrap();
+        let staged = lib.import_wechat_manifest(&scripts, &manifest);
+        std::env::set_var("PATH", old_path);
+        let staged = staged.unwrap();
+        assert!(staged.detail.contains("下载成功 1 · 失败 2"));
+    }
+    #[test]
+    fn collect_wechat_import_uses_only_report_verified_files() {
+        let (dir, lib, _ids) = fixture();
+        let root = PathBuf::from(lib.snapshot().root);
+        let originals = root.join("downloads").join("wechat").join("originals");
+        fs::create_dir_all(&originals).unwrap();
+        let ok = originals.join("ok.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([5, 5, 5, 255]))
+            .save(&ok)
+            .unwrap();
+        // A stray file that is NOT referenced by the report must be ignored.
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([6, 6, 6, 255]))
+            .save(originals.join("stray.png"))
+            .unwrap();
+        let hash = {
+            let data = fs::read(&ok).unwrap();
+            format!("{:x}", sha2::Sha256::digest(&data))
+        };
+        // The downloader names originals by content hash.
+        fs::rename(&ok, originals.join(format!("{hash}.png"))).unwrap();
+        fs::write(root.join("downloads").join("wechat").join("report.json"), serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1, "expected_items": 1, "items": [
+                {"id": "1", "status": "verified", "url": "https://mmbiz.qpic.cn/a", "sha256": hash, "format": "png", "resource_identity": "b".repeat(64)}
+            ]
+        })).unwrap()).unwrap();
+        let mut lib = lib;
+        let (report, _path) = lib.collect_wechat_import().unwrap();
+        assert_eq!(report.added, 1, "only the referenced file is imported");
+        assert!(lib.import_files(vec![originals.join("stray.png")], "微信".into()).is_ok());
+    }
+
+    #[test]
+    fn wechat_manifest_requires_existing_file_and_script() {
+        let (dir, lib, _ids) = fixture();
+        let scripts = dir.path().join("scripts");
+        fs::create_dir(&scripts).unwrap();
+        assert!(lib.import_wechat_manifest(&scripts, &dir.path().join("missing.txt")).is_err());
+        fs::write(dir.path().join("urls.txt"), "https://mmbiz.qpic.cn/a
+").unwrap();
+        assert!(lib
+            .import_wechat_manifest(&scripts, &dir.path().join("urls.txt"))
+            .is_err());
+    }
+
     #[test]
     fn export_sanitizes_names_and_rejects_empty_selection() {
         let (dir, lib, ids) = fixture();
