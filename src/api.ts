@@ -62,3 +62,25 @@ export async function restoreBackup(): Promise<string | null> {
 export function openLibraryPath(path: string): Promise<Snapshot> {
   return invoke<Snapshot>('select_library', { path, create: false });
 }
+
+export async function scanDuplicates(): Promise<import('./types').ScanReport> {
+  return invoke('scan_duplicates');
+}
+
+export async function createGroup(expectedRoot: string, memberIds: string[], mainAssetId: string, tags: string[], collections: string[]): Promise<import('./types').ManagementSnapshot> {
+  return invoke('create_group', { expectedRoot, memberIds, mainAssetId, tags, collections });
+}
+
+export async function disbandGroup(expectedRoot: string, groupId: string): Promise<import('./types').ManagementSnapshot> {
+  return invoke('disband_group', { expectedRoot, groupId });
+}
+
+export async function ignorePair(expectedRoot: string, assetA: string, assetB: string): Promise<import('./types').ManagementSnapshot> {
+  return invoke('ignore_pair', { expectedRoot, assetA, assetB });
+}
+
+export async function exportAssets(expectedRoot: string, assetIds: string[], nameMap: Record<string, string>): Promise<import('./types').ExportSummary | null> {
+  const path = await open({ directory: true, multiple: false, title: '选择导出位置（将新建导出文件夹）' });
+  if (!path) return null;
+  return invoke('export_assets', { expectedRoot, assetIds, targetParent: path, nameMap });
+}

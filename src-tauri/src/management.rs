@@ -44,6 +44,16 @@ pub struct Batch {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VersionGroup {
+    pub id: String,
+    pub main_asset_id: String,
+    pub member_ids: Vec<String>,
+    pub tags: Vec<String>,
+    pub collections: Vec<String>,
+    pub created_at: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManagementSnapshot {
     pub version: u32,
     pub metadata: BTreeMap<String, AssetMetadata>,
@@ -53,6 +63,12 @@ pub struct ManagementSnapshot {
     /// Logical recycle bin: asset id → trashed-at unix seconds. Files stay in assets/.
     #[serde(default)]
     pub trash: BTreeMap<String, u64>,
+    /// Manual duplicate review groups; originals stay untouched.
+    #[serde(default)]
+    pub groups: Vec<VersionGroup>,
+    /// Similarity pairs the user chose to ignore; never re-suggested.
+    #[serde(default)]
+    pub ignored_pairs: Vec<(String, String)>,
 }
 impl Default for ManagementSnapshot {
     fn default() -> Self {
@@ -63,6 +79,8 @@ impl Default for ManagementSnapshot {
             references: vec![],
             batches: vec![],
             trash: BTreeMap::new(),
+            groups: vec![],
+            ignored_pairs: vec![],
         }
     }
 }
@@ -91,7 +109,10 @@ fn text_valid(s: &str, max: usize, empty: bool) -> bool {
     (empty || !s.is_empty())
         && s.chars().count() <= max
         && s.trim() == s
-        && !s.chars().any(char::is_control)
+        && !s.chars().any(|c| {
+            c.is_control()
+                || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}')
+        })
 }
 fn read_file(path: &Path) -> Result<Vec<u8>, String> {
     if !fs::symlink_metadata(path)
@@ -138,6 +159,8 @@ impl Library {
             || m.accounts.len() > 1000
             || m.batches.len() > MAX_RECORDS
             || m.trash.len() > MAX_RECORDS
+            || m.groups.len() > MAX_RECORDS
+            || m.ignored_pairs.len() > MAX_RECORDS
         {
             return Err("管理文件版本或记录数量无效".into());
         }
@@ -188,6 +211,40 @@ impl Library {
                 return Err("管理文件采集批次无效".into());
             }
         }
+        eprintln!("[validate] groups={} ignored={}", m.groups.len(), m.ignored_pairs.len());
+        let mut grouped = HashSet::new();
+        let mut group_ids = HashSet::new();
+        for g in &m.groups {
+            if !hash_valid(&g.id)
+                || !hash_valid(&g.main_asset_id)
+                || g.member_ids.len() < 2
+                || g.member_ids.len() > 500
+                || g.created_at == 0
+                || !g.member_ids.contains(&g.main_asset_id)
+                || !group_ids.insert(&g.id)
+                || g.tags.len() > 50
+                || g.collections.len() > 50
+                || !g.tags.iter().all(|s| text_valid(s, 50, false))
+                || !g.collections.iter().all(|s| text_valid(s, 50, false))
+            {
+                return Err("管理文件版本分组无效".into());
+            }
+            self.asset_path(&g.main_asset_id)?;
+            for member in &g.member_ids {
+                if !hash_valid(member) || !grouped.insert(member) {
+                    return Err("管理文件版本分组无效".into());
+                }
+                self.asset_path(member)?;
+            }
+        }
+        for (a, b) in &m.ignored_pairs {
+            if a >= b || !hash_valid(a) || !hash_valid(b) {
+                return Err("管理文件忽略对比无效".into());
+            }
+            self.asset_path(a)?;
+            self.asset_path(b)?;
+        }
+        eprintln!("[validate] ok");
         Ok(())
     }
     pub fn get_management(&self) -> Result<ManagementSnapshot, String> {
@@ -285,12 +342,116 @@ impl Library {
             if !seen.insert(id.clone()) {
                 continue;
             }
+            if trashed && m.groups.iter().any(|g| g.member_ids.contains(&id)) {
+                // Guard both directions: disbanding needs every member visible.
+                return Err("版本分组中的素材不能移入回收站，请先拆分分组".into());
+            }
             if trashed {
                 // Keep the original trash time when the item is already trashed.
                 m.trash.entry(id).or_insert(now);
             } else {
                 m.trash.remove(&id);
             }
+        }
+        self.write_management(&m)?;
+        Ok(m)
+    }
+    /// Group assets for manual duplicate review. Requires at least two members,
+    /// all present, none trashed, none already grouped; originals stay untouched.
+    pub fn create_group(
+        &self,
+        expected_root: &str,
+        member_ids: Vec<String>,
+        main_asset_id: String,
+        tags: Vec<String>,
+        collections: Vec<String>,
+    ) -> Result<ManagementSnapshot, String> {
+        self.check_expected_root(expected_root)?;
+        if member_ids.len() < 2 || member_ids.len() > 500 {
+            return Err("版本分组需要 2–500 个素材".into());
+        }
+        let mut m = self.get_management()?;
+        let mut seen = HashSet::new();
+        for member in &member_ids {
+            if !hash_valid(member) || !seen.insert(member) {
+                return Err("版本分组成员无效".into());
+            }
+            self.asset_path(member)?;
+            if m.trash.contains_key(member) {
+                return Err("回收站中的素材不能加入版本分组".into());
+            }
+            if m.groups.iter().any(|g| g.member_ids.contains(member)) {
+                return Err("素材已在其他版本分组中".into());
+            }
+        }
+        if !seen.contains(&main_asset_id) {
+            return Err("主展示版本必须是分组成员".into());
+        }
+        let normalize = |list: Vec<String>| {
+            let mut seen = HashSet::new();
+            list.into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && seen.insert(s.clone()))
+                .collect::<Vec<_>>()
+        };
+        let tags = normalize(tags);
+        let collections = normalize(collections);
+        if tags.len() > 50 || collections.len() > 50 {
+            return Err("分组的标签或合集最多 50 个".into());
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?;
+        let seed = format!("{:?}:{}", member_ids, now.as_nanos());
+        m.groups.push(VersionGroup {
+            id: digest(seed.as_bytes()),
+            main_asset_id,
+            member_ids,
+            tags,
+            collections,
+            created_at: now.as_secs(),
+        });
+        self.write_management(&m)?;
+        Ok(m)
+    }
+    /// Remove a group. Members keep their own metadata; assets are untouched.
+    pub fn disband_group(
+        &self,
+        expected_root: &str,
+        group_id: &str,
+    ) -> Result<ManagementSnapshot, String> {
+        self.check_expected_root(expected_root)?;
+        let mut m = self.get_management()?;
+        let before = m.groups.len();
+        m.groups.retain(|g| g.id != group_id);
+        if m.groups.len() == before {
+            return Err("版本分组不存在".into());
+        }
+        self.write_management(&m)?;
+        Ok(m)
+    }
+    /// Never suggest this similarity pair again. The pair is stored ordered.
+    pub fn ignore_pair(
+        &self,
+        expected_root: &str,
+        asset_a: &str,
+        asset_b: &str,
+    ) -> Result<ManagementSnapshot, String> {
+        self.check_expected_root(expected_root)?;
+        if asset_a == asset_b || !hash_valid(asset_a) || !hash_valid(asset_b) {
+            return Err("忽略对无效".into());
+        }
+        self.asset_path(asset_a)?;
+        self.asset_path(asset_b)?;
+        let mut m = self.get_management()?;
+        let pair = if asset_a < asset_b {
+            (asset_a.to_string(), asset_b.to_string())
+        } else {
+            (asset_b.to_string(), asset_a.to_string())
+        };
+        if !m.ignored_pairs.contains(&pair) {
+            m.ignored_pairs.push(pair);
+            m.ignored_pairs.sort();
         }
         self.write_management(&m)?;
         Ok(m)
@@ -645,6 +806,70 @@ mod tests {
         assert_eq!(m.references.len(), 2);
         assert_eq!(m.trash.len(), 1);
         assert!(m.trash.contains_key(&ids[0]));
+    }
+    #[test]
+    fn groups_validate_membership_and_persist_without_touching_assets() {
+        let (dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        let manifest = fs::read(Path::new(&root).join("library.json")).unwrap();
+        // Too few members rejected.
+        assert!(lib
+            .create_group(&root, vec![ids[0].clone()], ids[0].clone(), vec![], vec![])
+            .is_err());
+        // Main must be a member.
+        assert!(lib
+            .create_group(&root, ids.clone(), "e".repeat(64), vec![], vec![])
+            .is_err());
+        let m = lib
+            .create_group(
+                &root,
+                ids.clone(),
+                ids[0].clone(),
+                vec!["系列".into(), "系列".into()],
+                vec!["常用".into()],
+            )
+            .unwrap();
+        assert_eq!(m.groups.len(), 1);
+        assert_eq!(m.groups[0].tags, vec!["系列"]);
+        assert_eq!(
+            manifest,
+            fs::read(Path::new(&root).join("library.json")).unwrap()
+        );
+        // No re-grouping the same member.
+        assert!(lib
+            .create_group(&root, ids.clone(), ids[0].clone(), vec![], vec![])
+            .is_err());
+        drop(lib);
+        let reopened = Library::open(Path::new(&root)).unwrap();
+        let m = reopened.get_management().unwrap();
+        assert_eq!(m.groups.len(), 1);
+        let group_id = m.groups[0].id.clone();
+        let m = reopened.disband_group(&root, &group_id).unwrap();
+        assert!(m.groups.is_empty());
+        assert!(reopened.disband_group(&root, &group_id).is_err());
+        let _ = dir;
+    }
+    #[test]
+    fn trashed_assets_cannot_join_groups_and_ignore_pairs_are_ordered() {
+        let (dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        lib.set_trash(&root, vec![ids[0].clone()], true).unwrap();
+        assert!(lib
+            .create_group(&root, ids.clone(), ids[0].clone(), vec![], vec![])
+            .is_err());
+        lib.set_trash(&root, vec![ids[0].clone()], false).unwrap();
+        let m = lib.ignore_pair(&root, &ids[1], &ids[0]).unwrap();
+        let expected = if ids[0] < ids[1] {
+            (ids[0].clone(), ids[1].clone())
+        } else {
+            (ids[1].clone(), ids[0].clone())
+        };
+        assert_eq!(m.ignored_pairs, vec![expected]);
+        // Idempotent and canonical order.
+        let m = lib.ignore_pair(&root, &ids[0], &ids[1]).unwrap();
+        assert_eq!(m.ignored_pairs.len(), 1);
+        assert!(lib.ignore_pair(&root, &ids[0], &ids[0]).is_err());
+        let _ = dir;
     }
     #[cfg(unix)]
     #[test]

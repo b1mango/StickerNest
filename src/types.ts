@@ -39,6 +39,15 @@ export interface AssetMetadata {
   collections: string[];
 }
 
+export interface VersionGroup {
+  id: string;
+  mainAssetId: string;
+  memberIds: string[];
+  tags: string[];
+  collections: string[];
+  createdAt: number;
+}
+
 export interface ManagementSnapshot {
   version: number;
   metadata: Record<string, AssetMetadata>;
@@ -46,6 +55,23 @@ export interface ManagementSnapshot {
   batches: { id: string; accountId: string; collectionItems: number; mappedResources: number; failedResources: number }[];
   references: { accountId: string; stickerId: string; assetId: string; resourceIdentity: string }[];
   trash: Record<string, number>;
+  groups: VersionGroup[];
+  ignoredPairs: [string, string][];
+}
+
+export interface ScanReport {
+  scannedStatics: number;
+  skippedAnimations: number;
+  skippedTiny: number;
+  failed: { assetId: string; error: string }[];
+  exactGroups: { pixelHash: string; assetIds: string[] }[];
+  similarPairs: { baseId: string; otherId: string; distance: number }[];
+}
+
+export interface ExportSummary {
+  path: string;
+  exported: number;
+  skipped: number;
 }
 
 export interface BackupSummary {

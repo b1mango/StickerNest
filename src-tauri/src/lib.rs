@@ -1,6 +1,7 @@
 pub mod backup;
 pub mod library;
 pub mod management;
+pub mod similar;
 use management::ManagementSnapshot;
 
 use backup::BackupSummary;
@@ -186,6 +187,76 @@ async fn restore_backup(backup_dir: String, target_parent: String) -> Result<Str
     .await
     .map_err(|e| e.to_string())?
 }
+#[tauri::command]
+fn scan_duplicates(state: State<'_, LibraryState>) -> Result<similar::ScanReport, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    let library = current.as_ref().ok_or("请先打开资料库")?;
+    // Runs on the command thread: the file lock stays held by the kept state,
+    // and the scan reads assets under that guarantee. ~1500 assets fits here.
+    let management = library.get_management()?;
+    let grouped: std::collections::HashSet<String> = management
+        .groups
+        .iter()
+        .flat_map(|g| g.member_ids.clone())
+        .collect();
+    library.scan_static_duplicates(&management.ignored_pairs, &grouped)
+}
+#[tauri::command]
+fn create_group(
+    state: State<'_, LibraryState>,
+    expected_root: String,
+    member_ids: Vec<String>,
+    main_asset_id: String,
+    tags: Vec<String>,
+    collections: Vec<String>,
+) -> Result<ManagementSnapshot, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    current.as_ref().ok_or("请先打开资料库")?.create_group(
+        &expected_root,
+        member_ids,
+        main_asset_id,
+        tags,
+        collections,
+    )
+}
+#[tauri::command]
+fn disband_group(
+    state: State<'_, LibraryState>,
+    expected_root: String,
+    group_id: String,
+) -> Result<ManagementSnapshot, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    current
+        .as_ref()
+        .ok_or("请先打开资料库")?
+        .disband_group(&expected_root, &group_id)
+}
+#[tauri::command]
+fn ignore_pair(
+    state: State<'_, LibraryState>,
+    expected_root: String,
+    asset_a: String,
+    asset_b: String,
+) -> Result<ManagementSnapshot, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    current
+        .as_ref()
+        .ok_or("请先打开资料库")?
+        .ignore_pair(&expected_root, &asset_a, &asset_b)
+}
+#[tauri::command]
+fn export_assets(
+    state: State<'_, LibraryState>,
+    expected_root: String,
+    asset_ids: Vec<String>,
+    target_parent: String,
+    name_map: std::collections::HashMap<String, String>,
+) -> Result<backup::ExportSummary, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    let library = current.as_ref().ok_or("请先打开资料库")?;
+    library.check_expected_root(&expected_root)?;
+    library.export_assets(Path::new(&target_parent), &asset_ids, &name_map)
+}
 
 pub fn run() {
     tauri::Builder::default()
@@ -200,7 +271,12 @@ pub fn run() {
             import_provenance,
             set_trash,
             backup_library,
-            restore_backup
+            restore_backup,
+            scan_duplicates,
+            create_group,
+            disband_group,
+            ignore_pair,
+            export_assets
         ])
         .run(tauri::generate_context!())
         .expect("无法启动拾趣桌面应用");

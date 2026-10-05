@@ -341,6 +341,130 @@ pub fn restore(backup_dir: &Path, target_parent: &Path) -> Result<PathBuf, Strin
     Ok(target)
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSummary {
+    pub path: String,
+    pub exported: usize,
+    pub skipped: usize,
+}
+
+impl Library {
+    /// Export assets to a fresh StickerNest Export folder. Original bytes and
+    /// format are preserved; renames never overwrite; trash is excluded.
+    /// The Tauri command checks expected_root before delegating here.
+    pub fn export_assets(
+        &self,
+        target_parent: &Path,
+        asset_ids: &[String],
+        name_map: &std::collections::HashMap<String, String>,
+    ) -> Result<ExportSummary, String> {
+        let root = PathBuf::from(self.snapshot().root);
+        let parent = target_parent
+            .canonicalize()
+            .map_err(|e| format!("无法访问所选文件夹：{e}"))?;
+        if !parent.is_dir() {
+            return Err("请选择导出存放的文件夹".into());
+        }
+        if parent == root || parent.starts_with(&root) {
+            return Err("不能导出到资料库内部".into());
+        }
+        if asset_ids.is_empty() || asset_ids.len() > MAX_FILES {
+            return Err("一次最多导出 20000 个素材".into());
+        }
+        let management = self.get_management()?;
+        let mut skipped = 0_usize;
+        let mut live: Vec<&String> = vec![];
+        let mut seen = HashSet::new();
+        for id in asset_ids {
+            if !hash_valid(id) || !seen.insert(id) {
+                skipped += 1;
+                continue;
+            }
+            if management.trash.contains_key(id) {
+                skipped += 1;
+                continue;
+            }
+            live.push(id);
+        }
+        let stamped = timestamp_label(now()?);
+        let mut target = parent.join(format!("StickerNest Export {stamped}"));
+        let mut suffix = 1;
+        // Timestamp collisions append a suffix; existing folders are never reused.
+        while target.exists() {
+            target = parent.join(format!("StickerNest Export {stamped}-{suffix}"));
+            suffix += 1;
+        }
+        fs::create_dir(&target)
+            .map_err(|e| format!("无法创建导出文件夹（不会覆盖已有文件夹）：{e}"))?;
+        for id in &live {
+            let source = self.asset_path(id)?;
+            let bytes = read_bounded(&source)?;
+            let item = self
+                .snapshot()
+                .items
+                .into_iter()
+                .find(|item| item.id == **id)
+                .ok_or("素材不存在")?;
+            let extension = item.format;
+            let base = name_map
+                .get(*id)
+                .cloned()
+                .unwrap_or_else(|| item.name.trim_end_matches(&format!(".{extension}")).to_string());
+            // Strip path separators, ASCII controls, and Unicode format
+            // characters (bidi overrides, zero-width, BOM) that can spoof
+            // extensions or make names look identical while differing.
+            let base = sanitize_name(&base);
+            // macOS limits file names to 255 UTF-8 bytes; leave room for the
+            // "-N" suffix and the extension.
+            let name_budget = 250_usize.saturating_sub(extension.len() + 1);
+            let base = truncate_utf8(base.trim().trim_end_matches('.').trim(), name_budget);
+            let base = if base.is_empty() || base.chars().all(|c| c == '.') {
+                id[..12].to_string()
+            } else {
+                base.to_string()
+            };
+            let mut file_name = format!("{base}.{extension}");
+            let mut destination = target.join(&file_name);
+            let mut suffix = 1;
+            while fs::symlink_metadata(&destination).is_ok() {
+                file_name = format!("{base}-{suffix}.{extension}");
+                destination = target.join(&file_name);
+                suffix += 1;
+            }
+            write_verified(&destination, &bytes)?;
+        }
+        Ok(ExportSummary {
+            path: target.to_string_lossy().into_owned(),
+            exported: live.len(),
+            skipped,
+        })
+    }
+}
+
+/// Remove characters that could spoof names across filesystems or displays.
+fn sanitize_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| {
+            !"/\\:*?\"<>|\r\n\t".contains(*c)
+                && !c.is_control()
+                && !matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}')
+        })
+        .collect()
+}
+
+/// Truncate to at most `max_bytes` UTF-8 bytes without splitting a character.
+fn truncate_utf8(name: &str, max_bytes: usize) -> &str {
+    if name.len() <= max_bytes {
+        return name;
+    }
+    let mut end = max_bytes;
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    &name[..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,5 +632,92 @@ mod tests {
         fs::create_dir(&not_backup).unwrap();
         let error = restore(&not_backup, dir.path()).unwrap_err();
         assert!(error.contains("不是有效的拾趣备份"));
+    }
+    #[test]
+    fn export_preserves_bytes_never_overwrites_and_skips_trash() {
+        let (dir, lib, ids) = fixture();
+        let root = PathBuf::from(lib.snapshot().root);
+        lib.set_trash(&root.to_string_lossy(), vec![ids[0].clone()], true)
+            .unwrap();
+        let names = std::collections::HashMap::from([
+            (ids[0].clone(), "开心".to_string()),
+            (ids[1].clone(), "开心".to_string()),
+        ]);
+        let summary = lib
+            .export_assets(dir.path(), &ids, &names)
+            .unwrap();
+        assert_eq!(summary.exported, 1);
+        assert_eq!(summary.skipped, 1);
+        let first_path = summary.path.clone();
+        let target = std::path::PathBuf::from(&summary.path);
+        let file = std::fs::read_dir(&target).unwrap().next().unwrap().unwrap();
+        assert!(file.file_name().to_string_lossy().starts_with("开心"));
+        // Bytes are preserved exactly.
+        assert_eq!(
+            std::fs::read(file.path()).unwrap(),
+            std::fs::read(lib.asset_path(&ids[1]).unwrap()).unwrap()
+        );
+        // A second export produces another folder, never overwrites.
+        let summary2 = lib
+            .export_assets(dir.path(), &ids, &names)
+            .unwrap();
+        assert_ne!(first_path, summary2.path);
+        assert!(lib
+            .export_assets(&root, &ids, &names)
+            .is_err());
+    }
+    #[test]
+    fn export_sanitizes_names_and_rejects_empty_selection() {
+        let (dir, lib, ids) = fixture();
+        let names = std::collections::HashMap::from([(
+            ids[0].clone(),
+            "a/b\\c:d*e?f\"g|h😀".to_string(),
+        )]);
+        let summary = lib
+            .export_assets(dir.path(), &[ids[0].clone()], &names)
+            .unwrap();
+        let target = std::path::PathBuf::from(summary.path);
+        let name = std::fs::read_dir(&target)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name();
+        let name = name.to_string_lossy();
+        assert!(!name.contains('/') && !name.contains('\\') && !name.contains(':'));
+        assert!(name.contains('😀'));
+        assert!(name.ends_with(".png"));
+        assert!(lib
+            .export_assets(dir.path(), &[], &Default::default())
+            .is_err());
+    }
+    #[test]
+    fn export_strips_spoofing_characters_and_truncates_by_bytes() {
+        let (dir, lib, ids) = fixture();
+        // Bidi override + zero-width + BOM: all must be stripped.
+        let sneaky = "ok\u{202E}gpj\u{200B}.\u{FEFF}png".to_string();
+        let names = std::collections::HashMap::from([(ids[0].clone(), sneaky)]);
+        let summary = lib
+            .export_assets(dir.path(), &[ids[0].clone()], &names)
+            .unwrap();
+        let target = std::path::PathBuf::from(&summary.path);
+        let entry = std::fs::read_dir(&target).unwrap().next().unwrap().unwrap();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        assert!(!name.chars().any(|c| ('\u{2000}'..='\u{206F}').contains(&c) || c == '\u{FEFF}'));
+        // 100 four-byte emoji must truncate within the byte budget and never error.
+        let long = "😀".repeat(100);
+        let names = std::collections::HashMap::from([(ids[1].clone(), long)]);
+        let summary = lib
+            .export_assets(dir.path(), &[ids[1].clone()], &names)
+            .unwrap();
+        let entry = std::fs::read_dir(std::path::PathBuf::from(&summary.path))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let name = entry.file_name();
+        assert!(name.to_string_lossy().len() <= 255);
+        assert!(name.to_string_lossy().ends_with(".png"));
     }
 }
