@@ -331,12 +331,14 @@ export default function App() {
         <nav>{navigation.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${source === id ? 'selected' : ''}`} aria-current={source === id ? 'page' : undefined} onClick={() => { setSource(id); setPage(1); }}><Icon size={18} /><span>{label}</span><span className="count">{counts[id]}</span></button>)}</nav>
         <div className="sidebar-bottom">
           <div className="local-indicator"><HardDrive size={16} /><span>本地存储</span><span className="status-dot" /></div>
-          <button className="button secondary full-width" disabled={disabled} onClick={() => openLibrary(false)}><FolderOpen size={16} />打开资料库</button>
-          {library ? <button className="button secondary full-width" disabled={disabled} onClick={() => setShowCollect(true)}><Music2 size={16} />采集抖音收藏</button> : null}
-          {library ? <button className="button secondary full-width" disabled={disabled} onClick={backupCurrentLibrary}><HardDriveDownload size={16} />备份资料库</button> : null}
+          <div className="sidebar-actions">
+            <button className="button secondary full-width" disabled={disabled} onClick={() => openLibrary(false)}><FolderOpen size={16} />打开资料库</button>
+            {library ? <button className="button secondary full-width" disabled={disabled} onClick={() => setShowCollect(true)}><Music2 size={16} />采集抖音收藏</button> : null}
+            {library ? <button className="button secondary full-width" disabled={disabled} onClick={backupCurrentLibrary}><HardDriveDownload size={16} />备份资料库</button> : null}
+          </div>
           <div className="sidebar-links">
-            {library ? <button className="text-button" disabled={disabled} onClick={() => openLibrary(true)}>新建资料库</button> : null}
-            <button className="text-button" disabled={disabled} onClick={restoreFromBackup}><ArchiveRestore size={15} />从备份恢复</button>
+            {library ? <button className="text-button slim" disabled={disabled} onClick={() => openLibrary(true)}>新建资料库</button> : null}
+            <button className="text-button slim" disabled={disabled} onClick={restoreFromBackup}><ArchiveRestore size={15} />从备份恢复</button>
           </div>
         </div>
       </aside>
