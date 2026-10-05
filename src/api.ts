@@ -107,6 +107,18 @@ export async function collectWechatImport(): Promise<{ snapshot: Snapshot; repor
   return invoke('collect_wechat_import');
 }
 
+export async function wechatDetectAccounts(): Promise<{ wxid: string; hasDb: boolean; hasCachedKey: boolean }[]> {
+  return invoke('wechat_detect_accounts');
+}
+
+export async function wechatCheckRunning(): Promise<number> {
+  return invoke('wechat_check_running');
+}
+
+export async function wechatDumpAndExport(wxid: string): Promise<{ urlsTxt: string; count: number; stageDetail: string; usedCachedKey: boolean }> {
+  return invoke('wechat_dump_and_export', { wxid });
+}
+
 export async function ignorePair(expectedRoot: string, assetA: string, assetB: string): Promise<import('./types').ManagementSnapshot> {
   return invoke('ignore_pair', { expectedRoot, assetA, assetB });
 }

@@ -2,6 +2,8 @@ pub mod backup;
 pub mod library;
 pub mod management;
 pub mod similar;
+pub mod wechat;
+pub mod wechat_db;
 use management::ManagementSnapshot;
 
 use backup::BackupSummary;
@@ -384,6 +386,86 @@ async fn import_wechat_manifest(
 }
 
 #[tauri::command]
+fn wechat_detect_accounts() -> Result<Vec<wechat::WeChatAccount>, String> {
+    wechat::detect_accounts()
+}
+
+#[tauri::command]
+fn wechat_check_running(app: tauri::AppHandle) -> usize {
+    let _ = app;
+    match wechat::check_wechat_running() {
+        wechat::WeChatRunning::NotRunning => 0,
+        wechat::WeChatRunning::Running(n) => n,
+    }
+}
+
+#[tauri::command]
+async fn wechat_dump_and_export(app: tauri::AppHandle, wxid: String) -> Result<WeChatUrlsResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let urls = wechat_db_urls(&app, &wxid)?;
+        Ok(urls)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WeChatUrlsResult {
+    urls_txt: String,
+    count: usize,
+    stage_detail: String,
+    used_cached_key: bool,
+}
+
+fn wechat_db_urls(app: &tauri::AppHandle, wxid: &str) -> Result<WeChatUrlsResult, String> {
+    let root = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "无法定位用户主目录".to_string())?
+        .join("Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files")
+        .join(wxid);
+    let db_path = root.join("db_storage/emoticon/emoticon.db");
+    if !db_path.is_file() {
+        return Err("该账号没有找到表情数据库".into());
+    }
+    let stage_dir = root.join("downloads/wechat");
+    std::fs::create_dir_all(&stage_dir).map_err(|e| e.to_string())?;
+    let urls_path = stage_dir.join("emoticon_urls.txt");
+
+    let (key, used_cached) = match wechat::cached_key(wxid)? {
+        Some(key) => (key, true),
+        None => {
+            let key = wechat::dump_key(wxid, &mut |_note| {})?;
+            (key, false)
+        }
+    };
+    let count = match wechat_db::export_urls(&db_path, &key, &urls_path) {
+        Ok(count) => count,
+        Err(e) if used_cached => {
+            // Cached key no longer decrypts: refresh it once, then retry.
+            let fresh = wechat::dump_key(wxid, &mut |_note| {})?;
+            let key = fresh;
+            match wechat_db::export_urls(&db_path, &key, &urls_path) {
+                Ok(count) => count,
+                Err(e2) => return Err(e2),
+            }
+        }
+        Err(e) => return Err(e),
+    };
+    let _ = app;
+    Ok(WeChatUrlsResult {
+        urls_txt: urls_path.to_string_lossy().into_owned(),
+        count,
+        stage_detail: if used_cached {
+            "使用缓存密钥本地解密，未打扰微信".into()
+        } else {
+            "已通过微信本地副本取得密钥并完成解密，密钥已缓存：后续无需再打扰微信".into()
+        },
+        used_cached_key: used_cached,
+    })
+}
+
+#[tauri::command]
 async fn collect_wechat_import(app: tauri::AppHandle) -> Result<CollectImportResponse, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<LibraryState>();
@@ -441,7 +523,10 @@ pub fn run() {
             collect_douyin_fetch,
             collect_douyin_import,
             import_wechat_manifest,
-            collect_wechat_import
+            collect_wechat_import,
+            wechat_detect_accounts,
+            wechat_check_running,
+            wechat_dump_and_export
         ])
         .run(tauri::generate_context!())
         .expect("无法启动拾趣桌面应用");
