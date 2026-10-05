@@ -224,18 +224,25 @@ async fn restore_backup(backup_dir: String, target_parent: String) -> Result<Str
     .map_err(|e| e.to_string())?
 }
 #[tauri::command]
-fn scan_duplicates(state: State<'_, LibraryState>) -> Result<similar::ScanReport, String> {
-    let current = state.0.lock().map_err(|_| "资料库忙")?;
-    let library = current.as_ref().ok_or("请先打开资料库")?;
-    // Runs on the command thread: the file lock stays held by the kept state,
-    // and the scan reads assets under that guarantee. ~1500 assets fits here.
-    let management = library.get_management()?;
-    let grouped: std::collections::HashSet<String> = management
-        .groups
-        .iter()
-        .flat_map(|g| g.member_ids.clone())
-        .collect();
-    library.scan_static_duplicates(&management.ignored_pairs, &grouped)
+async fn scan_duplicates(app: tauri::AppHandle) -> Result<similar::ScanReport, String> {
+    // Long scans run off the main thread so the UI stays responsive; the
+    // foreground library keeps its lock alive while the clone decodes assets.
+    let library = {
+        let state = app.state::<LibraryState>();
+        let current = state.0.lock().map_err(|_| "资料库忙")?;
+        current.as_ref().ok_or("请先打开资料库")?.clone()
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let management = library.get_management()?;
+        let grouped: std::collections::HashSet<String> = management
+            .groups
+            .iter()
+            .flat_map(|g| g.member_ids.clone())
+            .collect();
+        library.scan_static_duplicates(&management.ignored_pairs, &grouped)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 fn create_group(

@@ -49,7 +49,7 @@ pub struct ImportReport {
     pub failed: Vec<ImportFailure>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
     version: u32,
@@ -59,8 +59,24 @@ struct Manifest {
 pub struct Library {
     root: PathBuf,
     manifest: Manifest,
-    // Holding this handle keeps the advisory exclusive lock for the library lifetime.
-    _lock: File,
+    // Arc-shared handle: clones see the same open file table entry, so the
+    // advisory exclusive lock stays held for as long as any clone lives.
+    lock: std::sync::Arc<File>,
+}
+
+impl Clone for Library {
+    fn clone(&self) -> Self {
+        // Background scans share the lock with the foreground; a stale manifest
+        // snapshot only affects which assets the scan covers, never writes.
+        Self {
+            root: self.root.clone(),
+            manifest: Manifest {
+                version: self.manifest.version,
+                items: self.manifest.items.clone(),
+            },
+            lock: std::sync::Arc::clone(&self.lock),
+        }
+    }
 }
 
 fn err(error: impl std::fmt::Display) -> String {
@@ -179,7 +195,7 @@ impl Library {
                 version: 1,
                 items: vec![],
             },
-            _lock: lock,
+            lock: std::sync::Arc::new(lock),
         };
         library.save(&library.manifest)?;
         Ok(library)
@@ -203,7 +219,7 @@ impl Library {
         Ok(Self {
             root,
             manifest,
-            _lock: lock,
+            lock: std::sync::Arc::new(lock),
         })
     }
 
