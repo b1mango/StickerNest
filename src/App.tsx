@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, ArchiveRestore, ArrowDownToLine, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Copy, Folder, FolderOpen, FolderPlus, HardDrive, HardDriveDownload, Images, Layers, LoaderCircle, MessageCircle, Music2, Search, Smile, Trash2, X } from 'lucide-react';
+import { Archive, ArrowDownToLine, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Copy, Ellipsis, Folder, FolderOpen, FolderPlus, HardDrive, Images, Layers, LoaderCircle, MessageCircle, Music2, Search, Smile, Trash2, X } from 'lucide-react';
 import { chooseLibrary, currentLibrary, imageUrl, importImages, isDesktop, getManagement, saveMetadata, importProvenance, setTrash, backupLibrary, restoreBackup, openLibraryPath, scanDuplicates, disbandGroup, ignorePair, exportAssets, saveGroupMetadata, batchRename, batchLabels } from './api';
 import { SOURCE_LABELS, formatBytes, type ExportSummary, type ImportReport, type ScanReport, type Snapshot, type Sticker, type ManagementSnapshot, type AssetMetadata } from './types';
 import { StickerDetail } from './components/StickerDetail';
@@ -8,6 +8,7 @@ import { ManagementPanel } from './components/ManagementPanel';
 import { DuplicateReview } from './components/DuplicateReview';
 import { BatchPanel } from './components/BatchPanel';
 import { CollectDialog } from './components/CollectDialog';
+import { LibraryMenu } from './components/LibraryMenu';
 import { WeChatImportDialog } from './components/WeChatImportDialog';
 import './styles.css';
 
@@ -86,6 +87,7 @@ export default function App() {
   const [showBatch, setShowBatch] = useState(false);
   const [includeVersions, setIncludeVersions] = useState(false);
   const [showCollect, setShowCollect] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
   const [showWechat, setShowWechat] = useState(false);
   const locked = useRef(false);
 
@@ -332,22 +334,19 @@ export default function App() {
         <p className="nav-caption">我的资料库</p>
         <nav>{navigation.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${source === id ? 'selected' : ''}`} aria-current={source === id ? 'page' : undefined} onClick={() => { setSource(id); setPage(1); }}><Icon size={18} /><span>{label}</span><span className="count">{counts[id]}</span></button>)}</nav>
         <div className="sidebar-bottom">
-          <div className="local-indicator"><HardDrive size={16} /><span>本地存储</span><span className="status-dot" /></div>
-          <div className="sidebar-actions">
-            <button className="button secondary full-width" disabled={disabled} onClick={() => openLibrary(false)}><FolderOpen size={16} />打开资料库</button>
-            {library ? <button className="button secondary full-width" disabled={disabled} onClick={() => setShowCollect(true)}><Music2 size={16} />采集抖音收藏</button> : null}
-            {library ? <button className="button secondary full-width" disabled={disabled} onClick={() => setShowWechat(true)}><MessageCircle size={16} />导入微信清单</button> : null}
-            {library ? <button className="button secondary full-width" disabled={disabled} onClick={backupCurrentLibrary}><HardDriveDownload size={16} />备份资料库</button> : null}
-          </div>
-          <div className="sidebar-links">
-            {library ? <button className="text-button slim" disabled={disabled} onClick={() => openLibrary(true)}>新建资料库</button> : null}
-            <button className="text-button slim" disabled={disabled} onClick={restoreFromBackup}><ArchiveRestore size={15} />从备份恢复</button>
-          </div>
+          <div className="local-indicator"><HardDrive size={15} /><span>本地存储</span><span className="status-dot" /></div>
+          {library ? <p className="sidebar-note" title={library.root}>{library.root.split('/').slice(-2).join('/')}</p> : null}
         </div>
       </aside>
 
       <main className="workspace" aria-busy={!!busy}>
-        <header className="page-header"><h1>{heading}<span className="heading-count">{counts[source]}</span></h1></header>
+        <header className="page-header">
+          <h1>{heading}<span className="heading-count">{counts[source]}</span></h1>
+          <div className="page-actions">
+            <button className="icon-button" aria-label="库动作" aria-haspopup="menu" disabled={disabled} onClick={() => setShowMenu(open => !open)}><Ellipsis size={20} /></button>
+            {showMenu ? <LibraryMenu disabled={disabled} onOpen={() => openLibrary(false)} onCreate={() => openLibrary(true)} onBackup={backupCurrentLibrary} onRestore={restoreFromBackup} onCollectDouyin={() => setShowCollect(true)} onImportWechat={() => setShowWechat(true)} onClose={() => setShowMenu(false)} /> : null}
+          </div>
+        </header>
         <div className="toolbar">
           <label className="search-field"><Search size={18} /><input type="search" placeholder="搜索名称或标签…" aria-label="搜索名称或标签" value={query} onChange={event => { setQuery(event.target.value); setPage(1); }} disabled={!library} /></label>
           <div className="import-controls"><label className="source-select"><span>导入来源</span><select aria-label="导入来源" value={importSource} onChange={event => setImportSource(event.target.value)} disabled={disabled || !library}>{Object.entries(SOURCE_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><button className="button primary" onClick={importFiles} disabled={disabled || !library}><ArrowDownToLine size={17} />导入表情</button></div>
