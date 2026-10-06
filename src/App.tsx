@@ -90,6 +90,26 @@ export default function App() {
   const [showMenu, setShowMenu] = useState(false);
   const [showWechat, setShowWechat] = useState(false);
   const locked = useRef(false);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { setShowMenu(false); return; }
+      const mod = event.metaKey || event.ctrlKey;
+      if (!mod) return;
+      if (event.key.toLowerCase() === 'f') { event.preventDefault(); searchRef.current?.focus(); searchRef.current?.select(); }
+      if (event.key.toLowerCase() === 'a' && inSelectableViewNow() && filteredRef.current.length) {
+        event.preventDefault();
+        setCheckedIds(new Set(filteredRef.current.map(item => item.id)));
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  const filteredRef = useRef<Sticker[]>([]);
+  const sourceRef = useRef(source);
+  sourceRef.current = source;
+  function inSelectableViewNow() { const s = sourceRef.current; return s !== 'trash' && s !== 'groups'; }
 
   useEffect(() => {
     if (!isDesktop) return;
@@ -314,6 +334,7 @@ export default function App() {
       if (result) { setManagement(result); setManagementNotice('报告已保存，完整性见“来源与精确去重”。'); }
     });
   }
+  filteredRef.current = filtered;
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const visiblePage = Math.min(page, totalPages);
   const visible = filtered.slice((visiblePage - 1) * PAGE_SIZE, visiblePage * PAGE_SIZE);
@@ -348,7 +369,7 @@ export default function App() {
           </div>
         </header>
         <div className="toolbar">
-          <label className="search-field"><Search size={18} /><input type="search" placeholder="搜索名称或标签…" aria-label="搜索名称或标签" value={query} onChange={event => { setQuery(event.target.value); setPage(1); }} disabled={!library} /></label>
+          <label className="search-field"><Search size={18} /><input ref={searchRef} type="search" placeholder="搜索名称或标签…" aria-label="搜索名称或标签" value={query} onChange={event => { setQuery(event.target.value); setPage(1); }} disabled={!library} /></label>
           <div className="import-controls"><label className="source-select"><span>导入来源</span><select aria-label="导入来源" value={importSource} onChange={event => setImportSource(event.target.value)} disabled={disabled || !library}>{Object.entries(SOURCE_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><button className="button primary" onClick={importFiles} disabled={disabled || !library}><ArrowDownToLine size={17} />导入表情</button></div>
         </div>
 
