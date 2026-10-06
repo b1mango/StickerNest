@@ -1,14 +1,14 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, ArrowDownToLine, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Copy, Ellipsis, Folder, FolderOpen, FolderPlus, HardDrive, Images, Layers, LoaderCircle, MessageCircle, Music2, Search, Smile, Trash2, X } from 'lucide-react';
-import { chooseLibrary, currentLibrary, imageUrl, importImages, isDesktop, getManagement, saveMetadata, importProvenance, setTrash, backupLibrary, restoreBackup, openLibraryPath, scanDuplicates, disbandGroup, ignorePair, exportAssets, saveGroupMetadata, batchRename, batchLabels } from './api';
+import { Archive, ArchiveRestore, ArrowDownToLine, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Copy, Folder, FolderOpen, FolderPlus, HardDriveDownload, Images, Layers, LoaderCircle, MessageCircle, Music2, Search, Smile, Trash2, X } from 'lucide-react';
+import { chooseLibrary, currentLibrary, imageUrl, importImages, isDesktop, getManagement, saveMetadata, importProvenance, setTrash, backupLibrary, restoreBackup, openLibraryPath, scanDuplicates, disbandGroup, ignorePair, exportAssets, saveGroupMetadata, batchRename, batchLabels, createGroup } from './api';
 import { SOURCE_LABELS, formatBytes, type ExportSummary, type ImportReport, type ScanReport, type Snapshot, type Sticker, type ManagementSnapshot, type AssetMetadata } from './types';
 import { StickerDetail } from './components/StickerDetail';
 import { StickerPreview } from './components/StickerPreview';
 import { ManagementPanel } from './components/ManagementPanel';
 import { DuplicateReview } from './components/DuplicateReview';
 import { BatchPanel } from './components/BatchPanel';
+import { ContextMenu } from './components/ContextMenu';
 import { CollectDialog } from './components/CollectDialog';
-import { LibraryMenu } from './components/LibraryMenu';
 import { WeChatImportDialog } from './components/WeChatImportDialog';
 import './styles.css';
 
@@ -85,6 +85,8 @@ export default function App() {
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [showBatch, setShowBatch] = useState(false);
+  const [showNewCollection, setShowNewCollection] = useState(false);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; item: Sticker | null } | null>(null);
   const [includeVersions, setIncludeVersions] = useState(false);
   const [showCollect, setShowCollect] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
@@ -292,6 +294,19 @@ export default function App() {
     }
     return { tags: [...tags].sort(), collections: [...collections].sort() };
   }, [management]);
+  const collectionEntries = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const item of library?.items ?? []) {
+      if (trashSet.has(item.id) || groupedNonMain.has(item.id)) continue;
+      for (const name of management?.metadata[item.id]?.collections ?? []) {
+        map.set(name, (map.get(name) ?? 0) + 1);
+      }
+    }
+    for (const group of management?.groups ?? []) {
+      for (const name of group.collections) map.set(name, (map.get(name) ?? 0) + 1);
+    }
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0], 'zh'));
+  }, [library, management, trashSet, groupedNonMain]);
   const effectiveLabelsOf = useMemo(() => {
     // Main versions answer for the group: member metadata plus group-level
     // tags and collections, as the design requires (displayed as a union).
@@ -353,10 +368,22 @@ export default function App() {
       <aside className="sidebar" aria-label="资料库导航">
         <div className="brand"><span className="brand-mark"><Smile size={25} strokeWidth={1.7} /></span><div><strong>拾趣</strong><span>StickerNest</span></div></div>
         <p className="nav-caption">我的资料库</p>
-        <nav>{navigation.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${source === id ? 'selected' : ''}`} aria-current={source === id ? 'page' : undefined} onClick={() => { setSource(id); setPage(1); }}><Icon size={18} /><span>{label}</span><span className="count">{counts[id]}</span></button>)}</nav>
+        <nav>{navigation.filter(item => ['all', '微信', '抖音', '本地'].includes(item.id)).map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${source === id ? 'selected' : ''}`} aria-current={source === id ? 'page' : undefined} onClick={() => { setSource(id); setCollection(''); setPage(1); }}><Icon size={17} /><span>{label}</span><span className="count">{counts[id]}</span></button>)}</nav>
+        {collectionEntries.length ? <>
+          <p className="nav-caption nav-caption-gap">我的合集</p>
+          <nav aria-label="我的合集">{collectionEntries.map(([name, count]) => <button key={name} className={`nav-item ${collection === name ? 'selected' : ''}`} aria-current={collection === name ? 'page' : undefined} onClick={() => { setCollection(current => current === name ? '' : name); setSource('all'); setPage(1); }}><FolderOpen size={15} /><span>{name}</span><span className="count">{count}</span></button>)}</nav>
+        </> : null}
+        <button className="text-button slim new-collection" disabled={!library || disabled} onClick={() => setShowNewCollection(true)}><FolderPlus size={14} />新建合集</button>
+        <p className="nav-caption nav-caption-gap">整理</p>
+        <nav>{navigation.filter(item => ['groups', 'trash'].includes(item.id)).map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${source === id ? 'selected' : ''}`} aria-current={source === id ? 'page' : undefined} onClick={() => { setSource(id); setPage(1); }}><Icon size={16} /><span>{label}</span><span className="count">{counts[id]}</span></button>)}</nav>
         <div className="sidebar-bottom">
-          <div className="local-indicator"><HardDrive size={15} /><span>本地存储</span><span className="status-dot" /></div>
-          {library ? <p className="sidebar-note" title={library.root}>{library.root.split('/').slice(-2).join('/')}</p> : null}
+          <div className="settings-card" role="group" aria-label="库设置">
+            <button className="settings-item" disabled={disabled} onClick={() => openLibrary(false)}><FolderOpen size={16} /><span>打开资料库</span></button>
+            <button className="settings-item" disabled={disabled} onClick={() => openLibrary(true)}><FolderPlus size={16} /><span>新建资料库</span></button>
+            <div className="settings-sep" role="separator" />
+            <button className="settings-item" disabled={disabled || !library} onClick={backupCurrentLibrary}><HardDriveDownload size={16} /><span>备份这个库</span></button>
+            <button className="settings-item" disabled={disabled} onClick={restoreFromBackup}><ArchiveRestore size={16} /><span>从备份恢复</span></button>
+          </div>
         </div>
       </aside>
 
@@ -364,8 +391,15 @@ export default function App() {
         <header className="page-header">
           <h1>{heading}<span className="heading-count">{counts[source]}</span></h1>
           <div className="page-actions">
-            <button className="icon-button" aria-label="库动作" aria-haspopup="menu" disabled={disabled} onClick={() => setShowMenu(open => !open)}><Ellipsis size={20} /></button>
-            {showMenu ? <LibraryMenu disabled={disabled} onOpen={() => openLibrary(false)} onCreate={() => openLibrary(true)} onBackup={backupCurrentLibrary} onRestore={restoreFromBackup} onCollectDouyin={() => setShowCollect(true)} onImportWechat={() => setShowWechat(true)} onClose={() => setShowMenu(false)} /> : null}
+            <div className="import-split">
+              <button className="button primary import-main" disabled={disabled || !library} onClick={importFiles}><ArrowDownToLine size={16} />导入表情</button>
+              <button className="button primary import-caret" aria-label="获取方式" aria-haspopup="menu" disabled={disabled} onClick={() => setShowMenu(open => !open)}><ChevronRight className="rotate-left" size={15} /></button>
+              {showMenu ? <div className="library-menu import-menu" role="menu" aria-label="获取表情的方式">
+                <button className="menu-item" onClick={() => { importFiles(); setShowMenu(false); }}><FolderOpen size={15} /><span className="menu-item-text"><strong>从本地图片导入</strong><span className="menu-item-hint">选择 PNG / GIF / WebP 文件</span></span></button>
+                <button className="menu-item" disabled={disabled || !library} onClick={() => { setShowWechat(true); setShowMenu(false); }}><MessageCircle size={15} /><span className="menu-item-text"><strong>从微信获取</strong><span className="menu-item-hint">本机直接获取或清单导入</span></span></button>
+                <button className="menu-item" disabled={disabled || !library} onClick={() => { setShowCollect(true); setShowMenu(false); }}><Music2 size={15} /><span className="menu-item-text"><strong>采集抖音收藏</strong><span className="menu-item-hint">从网页登录的抖音面板</span></span></button>
+              </div> : null}
+            </div>
           </div>
         </header>
         <div className="toolbar">
@@ -385,7 +419,7 @@ export default function App() {
         {report ? <div className={`notice import-report ${report.failed.length ? 'warning' : 'success'}`} role="status"><CheckCircle2 size={18} /><div><strong>导入完成</strong><p>新增 {report.added} 个 · 重复 {report.duplicates} 个 · 失败 {report.failed.length} 个</p>{report.duplicates > 0 && trashSet.size > 0 ? <p>重复项未显示时，可能在回收站中。</p> : null}{report.failed.length ? <details><summary>查看失败文件</summary><ul>{report.failed.map((failure, index) => <li key={`${index}-${failure.name}`}><b>{failure.name}</b>：{failure.error}</li>)}</ul><p>修复后重新导入，已入库项会自动去重。</p></details> : null}</div><button className="icon-button" aria-label="关闭导入结果" onClick={() => setReport(null)}><X size={17} /></button></div> : null}
 
         {!library ? <section className="empty-state welcome"><span className="empty-icon"><Archive size={38} strokeWidth={1.4} /></span><h2>打开你的表情库</h2><p>把散落在各处的表情收进一个安静的画册。新建或打开一个本地资料库开始。</p><div className="empty-actions"><button className="button primary" disabled={disabled} onClick={() => openLibrary(true)}><FolderPlus size={18} />新建资料库</button><button className="button secondary" disabled={disabled} onClick={() => openLibrary(false)}><FolderOpen size={18} />打开已有资料库</button></div></section> : visible.length === 0 ? <section className="empty-state"><span className="empty-icon">{inEmptyTrash ? <Trash2 size={36} strokeWidth={1.4} /> : <Images size={36} strokeWidth={1.4} />}</span><h2>{emptyTitle}</h2><p>{emptyHint}</p>{isFiltering ? <button className="button secondary" onClick={() => { setQuery(''); setTag(''); setCollection(''); setSource('all'); setPage(1); }}>查看全部表情</button> : source === 'trash' || source === 'groups' ? null : <button className="button primary" disabled={disabled} onClick={importFiles}><ArrowDownToLine size={18} />导入表情</button>}</section> : <><div className="collection-caption"><span>{query ? `找到 ${filtered.length} 个表情` : `共 ${filtered.length} 个表情`}</span>{inSelectableView ? <div className="grid-actions">{checkedIds.size ? <span className="checked-caption">已选 {checkedIds.size} 项</span> : null}{library && management ? <button className="text-button" type="button" disabled={disabled} onClick={runScan}><Copy size={14} />查重扫描</button> : null}{checkedIds.size ? <button className="text-button" type="button" disabled={disabled} onClick={() => setShowBatch(open => !open)}>批量整理</button> : null}<label className="versions-check" title="导出时把所选素材所在分组的全部版本一并包括"><input type="checkbox" checked={includeVersions} onChange={event => setIncludeVersions(event.target.checked)} />含全部版本</label><button className="text-button" type="button" disabled={disabled || (checkedIds.size === 0 && filtered.length === 0)} onClick={exportSelection}><FolderOpen size={14} />{checkedIds.size ? '导出所选' : '导出当前列表'}</button></div> : null}</div>{showBatch && checkedIds.size ? <BatchPanel count={checkedIds.size} disabled={disabled} onRename={batchRenameSelected} onLabels={batchLabelsSelected} onTrash={trashSelected} onClose={() => setShowBatch(false)} /> : null}
-        <section className="sticker-grid" aria-label="表情列表">{visible.map(item => { const group = groupByMain.get(item.id); const isChecked = checkedIds.has(item.id); const memberItems = group ? group.memberIds.map(id => library.items.find(original => original.id === id)).filter((v): v is Sticker => !!v) : []; return <Fragment key={item.id}><div className="sticker-cell">{inSelectableView ? <input className="select-box" type="checkbox" aria-label={`选择 ${item.name}`} checked={isChecked} onChange={() => setCheckedIds(current => { const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next; })} /> : null}<button className={`sticker-card${isChecked ? ' checked' : ''}`} onClick={() => setSelected(library.items.find(original => original.id === item.id) ?? item)} aria-label={`查看 ${item.name}`}><div className="sticker-image"><StickerPreview key={`${library.root}/${item.fileName}`} src={imageUrl(library.root, item.fileName)} name={item.name} /><span className="format-badge">{item.format.toUpperCase()}</span>{group ? <span className="group-badge" title={`版本分组 ${group.memberIds.length} 项`}><Layers size={11} />{group.memberIds.length}</span> : null}</div><div className="sticker-info"><strong title={item.name}>{shortDisplayName(item.name)}</strong><span>{item.sources.map(origin => SOURCE_LABELS[origin] ?? origin).join(' / ')}<span>{formatBytes(item.bytes)}</span></span></div></button>{group ? <div className="group-tray"><button className="group-expand-btn" type="button" disabled={disabled} onClick={() => setExpandedGroups(current => { const next = new Set(current); if (next.has(group.id)) next.delete(group.id); else next.add(group.id); return next; })}>{expandedGroups.has(group.id) ? '收起版本' : `展开 ${group.memberIds.length} 个版本`}</button><button className="group-disband-btn" type="button" disabled={disabled} onClick={() => void disband(group.id)}>拆分分组</button>{group.tags.length || group.collections.length ? <span className="group-meta-inline" title={`组标签：${group.tags.join('、') || '无'} · 组合集：${group.collections.join('、') || '无'}`}>{group.tags.join('、')}{group.tags.length && group.collections.length ? ' · ' : ''}{group.collections.join('、')}</span> : null}</div> : null}</div>{group && expandedGroups.has(group.id) ? <div className="group-row"><div className="group-members">{memberItems.map(member => <button className="group-member" key={member.id} onClick={() => setSelected(member)} aria-label={`查看 ${member.name}`}><StickerPreview src={imageUrl(library.root, member.fileName)} name={member.name} /><span className="pair-caption" title={member.name}>{shortDisplayName(member.name)}</span></button>)}</div><GroupMetaEditor group={group} disabled={disabled} onSave={saveGroupMeta} /></div> : null}</Fragment>; })}</section><div className="pagination"><span>第 {visiblePage} / {totalPages} 页</span><button className="icon-button" aria-label="上一页" disabled={visiblePage === 1} onClick={() => setPage(visiblePage - 1)}><ChevronLeft size={20} /></button><button className="icon-button" aria-label="下一页" disabled={visiblePage === totalPages} onClick={() => setPage(visiblePage + 1)}><ChevronRight size={20} /></button></div></>}
+        <section className="sticker-grid" aria-label="表情列表">{visible.map(item => { const group = groupByMain.get(item.id); const isChecked = checkedIds.has(item.id); const memberItems = group ? group.memberIds.map(id => library.items.find(original => original.id === id)).filter((v): v is Sticker => !!v) : []; return <Fragment key={item.id}><div className="sticker-cell">{inSelectableView ? <input className="select-box" type="checkbox" aria-label={`选择 ${item.name}`} checked={isChecked} onChange={() => setCheckedIds(current => { const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next; })} /> : null}<button className={`sticker-card${isChecked ? ' checked' : ''}`} onClick={() => setSelected(library.items.find(original => original.id === item.id) ?? item)} onContextMenu={event => { event.preventDefault(); setCtxMenu({ x: event.clientX, y: event.clientY, item }); if (!checkedIds.has(item.id)) setCheckedIds(new Set([item.id])); }} aria-label={`查看 ${item.name}`}><div className="sticker-image"><StickerPreview key={`${library.root}/${item.fileName}`} src={imageUrl(library.root, item.fileName)} name={item.name} /><span className="format-badge">{item.format.toUpperCase()}</span>{group ? <span className="group-badge" title={`版本分组 ${group.memberIds.length} 项`}><Layers size={11} />{group.memberIds.length}</span> : null}</div><div className="sticker-info"><strong title={item.name}>{shortDisplayName(item.name)}</strong><span>{item.sources.map(origin => SOURCE_LABELS[origin] ?? origin).join(' / ')}<span>{formatBytes(item.bytes)}</span></span></div></button>{group ? <div className="group-tray"><button className="group-expand-btn" type="button" disabled={disabled} onClick={() => setExpandedGroups(current => { const next = new Set(current); if (next.has(group.id)) next.delete(group.id); else next.add(group.id); return next; })}>{expandedGroups.has(group.id) ? '收起版本' : `展开 ${group.memberIds.length} 个版本`}</button><button className="group-disband-btn" type="button" disabled={disabled} onClick={() => void disband(group.id)}>拆分分组</button>{group.tags.length || group.collections.length ? <span className="group-meta-inline" title={`组标签：${group.tags.join('、') || '无'} · 组合集：${group.collections.join('、') || '无'}`}>{group.tags.join('、')}{group.tags.length && group.collections.length ? ' · ' : ''}{group.collections.join('、')}</span> : null}</div> : null}</div>{group && expandedGroups.has(group.id) ? <div className="group-row"><div className="group-members">{memberItems.map(member => <button className="group-member" key={member.id} onClick={() => setSelected(member)} aria-label={`查看 ${member.name}`}><StickerPreview src={imageUrl(library.root, member.fileName)} name={member.name} /><span className="pair-caption" title={member.name}>{shortDisplayName(member.name)}</span></button>)}</div><GroupMetaEditor group={group} disabled={disabled} onSave={saveGroupMeta} /></div> : null}</Fragment>; })}</section><div className="pagination"><span>第 {visiblePage} / {totalPages} 页</span><button className="icon-button" aria-label="上一页" disabled={visiblePage === 1} onClick={() => setPage(visiblePage - 1)}><ChevronLeft size={20} /></button><button className="icon-button" aria-label="下一页" disabled={visiblePage === totalPages} onClick={() => setPage(visiblePage + 1)}><ChevronRight size={20} /></button></div></>}
         {checkedIds.size > 0 && inSelectableView ? <div className="batch-dock" role="region" aria-label="批量操作">
           <span className="batch-dock-count">已选 <b>{checkedIds.size}</b> 项</span>
           <button className="text-button" disabled={disabled} onClick={() => setShowBatch(open => !open)}>整理（重命名 / 标签 / 合集）</button>
@@ -399,6 +433,75 @@ export default function App() {
       {showDuplicates && scanReport && library && management ? <DuplicateReview report={scanReport} items={library.items} root={library.root} existingGroups={management.groups} onKeep={keepOneAsset} onIgnorePair={ignoreSimilarPair} onRescan={async () => setScanReport(await scanDuplicates())} onClose={() => setShowDuplicates(false)} /> : null}
       {showCollect && library && management ? <CollectDialog root={library.root} accounts={management.accounts.filter(a => a.platform === '抖音')} onSnapshot={(snapshot, warning) => { setLibrary(snapshot); setPage(1); if (warning) setPreviewWarning(warning); }} onManagement={setManagement} onError={setError} onClose={() => setShowCollect(false)} /> : null}
       {showWechat && library && management ? <WeChatImportDialog root={library.root} accounts={management.accounts.filter(a => a.platform === '微信')} onSnapshot={(snapshot, warning) => { setLibrary(snapshot); setPage(1); if (warning) setPreviewWarning(warning); }} onManagement={setManagement} onError={setError} onClose={() => setShowWechat(false)} /> : null}
+      {ctxMenu && library && management ? <ContextMenu x={ctxMenu.x} y={ctxMenu.y} onClose={() => setCtxMenu(null)} items={(() => {
+        const target = ctxMenu.item;
+        const targetId = target?.id ?? '';
+        const checked = [...checkedIds];
+        const multi = checkedIds.size > 1;
+        const singleActions = target ? [
+          { key: 'detail', label: '查看详情', onSelect: () => setSelected(library.items.find(o => o.id === targetId) ?? target) },
+          { key: 'sep1', label: '' },
+        ] : [];
+        const multiActions = multi ? [
+          { key: 'rename', label: `批量重命名（${checkedIds.size} 项）`, onSelect: () => setShowBatch(true) },
+          { key: 'tags', label: `批量标签 / 合集（${checkedIds.size} 项）`, onSelect: () => setShowBatch(true) },
+          { key: 'group', label: `加入版本分组（${checkedIds.size} 项）`, disabled: checkedIds.size < 2, onSelect: () => { void createGroup(library.root, checked, checked[0], [], []).then(setManagement).catch(setError); setCheckedIds(new Set()); } },
+          { key: 'sep2', label: '' },
+          { key: 'export', label: `导出所选（${checkedIds.size} 项）`, onSelect: exportSelection },
+        ] : [];
+        const common = [
+          { key: 'trash', label: multi ? `移入回收站（${checkedIds.size} 项）` : '移入回收站', danger: true, onSelect: () => { const ids = multi ? checked : [targetId]; void setTrash(library.root, ids, true).then(setManagement).catch(setError); setCheckedIds(new Set()); } },
+          { key: 'sep3', label: '' },
+          { key: 'clear', label: '清除选择', onSelect: () => setCheckedIds(new Set()) },
+        ];
+        return [...singleActions, ...multiActions, ...common];
+      })()} /> : null}
+      {showNewCollection && library && management ? <NewCollectionDialog checkedCount={checkedIds.size} disabled={disabled} onCreate={async (name) => {
+        if (checkedIds.size === 0) throw new Error('请先勾选要放入合集的表情。');
+        await batchLabelsSelected([], [], [name], []);
+        setCollection(name); setSource('all'); setShowNewCollection(false);
+      }} onClose={() => setShowNewCollection(false)} /> : null}
     </div>
+  );
+}
+
+function NewCollectionDialog({ checkedCount, disabled, onCreate, onClose }: {
+  checkedCount: number;
+  disabled: boolean;
+  onCreate: (name: string) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const dialog = useRef<HTMLDialogElement>(null);
+  const savingRef = useRef(false);
+  useEffect(() => {
+    const trigger = document.activeElement as HTMLElement | null;
+    dialog.current?.showModal();
+    return () => { dialog.current?.close(); trigger?.focus(); };
+  }, []);
+  async function save() {
+    if (savingRef.current) return;
+    const trimmed = name.trim();
+    if (!trimmed) { setError('请填写合集名称。'); return; }
+    if (trimmed.length > 50) { setError('合集名称最多 50 字。'); return; }
+    savingRef.current = true; setSaving(true); setError('');
+    try { await onCreate(trimmed); }
+    catch (reason) { setError(String(reason)); savingRef.current = false; setSaving(false); }
+  }
+  return (
+    <dialog className="detail-dialog collect-dialog" ref={dialog} onClose={() => { if (!dialog.current?.open) onClose(); }} aria-labelledby="new-collection-title" onCancel={event => { if (savingRef.current) event.preventDefault(); }}>
+      <div className="detail-heading"><span className="eyebrow">新建合集</span><button className="icon-button" autoFocus disabled={saving} onClick={() => dialog.current?.close()} aria-label="关闭"><X size={18} /></button></div>
+      <div className="detail-content collect-content">
+        <h2 id="new-collection-title">新建合集</h2>
+        <p className="field-hint">当前已勾选 {checkedCount} 项表情，会一并放入这个合集。可以先勾选几张要归到一起的表情再建。</p>
+        <form className="metadata-editor" onSubmit={event => { event.preventDefault(); void save(); }}>
+          <label className="field-label">合集名称<input value={name} maxLength={50} autoFocus={false} disabled={saving || disabled} onChange={event => setName(event.target.value)} /></label>
+          {error ? <p className="field-error" role="alert">{error}</p> : null}
+          <div className="editor-actions"><button className="button primary" type="submit" disabled={saving || disabled || !name.trim()}>{saving ? '正在创建…' : '创建合集'}</button><button className="button secondary" type="button" disabled={saving} onClick={() => dialog.current?.close()}>取消</button></div>
+        </form>
+      </div>
+    </dialog>
   );
 }
