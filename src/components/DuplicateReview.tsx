@@ -61,12 +61,12 @@ export function DuplicateReview({ report, items, root, existingGroups, onKeep, o
   const animationVisible = report.animationPairs.filter(pair => !groupedIds.has(pair.baseId) && !groupedIds.has(pair.otherId));
   return (
     <dialog className="detail-dialog duplicates-dialog" ref={dialog} onClose={() => { if (!dialog.current?.open) onClose(); }} aria-labelledby="duplicates-title">
-      <div className="detail-heading"><span className="eyebrow">查重审阅</span><button className="icon-button" autoFocus disabled={!!busyKey} onClick={() => dialog.current?.close()} aria-label="关闭查重"><X size={20} /></button></div>
+      <div className="detail-heading"><span className="eyebrow">相似项对比</span><button className="icon-button" autoFocus disabled={!!busyKey} onClick={() => dialog.current?.close()} aria-label="关闭相似项对比"><X size={20} /></button></div>
       <div className="detail-content duplicates-content">
-        <h2 id="duplicates-title">去重审阅</h2>
+        <h2 id="duplicates-title">相似项对比</h2>
         <p className="duplicates-summary">
           已扫描 {report.scannedStatics} 个静态素材、{report.scannedAnimations} 个动画；过小 {report.skippedTiny} 个{report.failed.length ? `；失败 ${report.failed.length} 个` : ''}。
-          在每组里点「保留」留下要的那张，其余移入回收站（可随时在回收站恢复）。也可以整组忽略。
+          每组选出要「保留」的那张，其余移入回收站（可随时恢复）；不需要处理的点「忽略」，之后不再提示。
         </p>
         {error ? <p className="field-error" role="alert">{error}</p> : null}
         {exactVisible.length === 0 && similarVisible.length === 0 && animationVisible.length === 0 ? <p className="duplicates-empty">没有需要处理的重复或相似候选。</p> : null}

@@ -41,6 +41,10 @@ export async function importProvenance(expectedRoot: string, accountAlias: strin
   return invoke('import_provenance', { expectedRoot, path, accountAlias, accountId, platform: null });
 }
 
+export async function addCollection(expectedRoot: string, name: string): Promise<import('./types').ManagementSnapshot> {
+  return invoke('add_collection', { expectedRoot, name });
+}
+
 export async function setTrash(expectedRoot: string, assetIds: string[], trashed: boolean): Promise<import('./types').ManagementSnapshot> {
   return invoke('set_trash', { expectedRoot, assetIds, trashed });
 }

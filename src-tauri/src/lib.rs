@@ -191,6 +191,18 @@ fn import_provenance(
     )
 }
 #[tauri::command]
+fn add_collection(
+    state: State<'_, LibraryState>,
+    expected_root: String,
+    name: String,
+) -> Result<ManagementSnapshot, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    current
+        .as_ref()
+        .ok_or("请先打开资料库")?
+        .add_collection_name(&expected_root, name)
+}
+#[tauri::command]
 fn set_trash(
     state: State<'_, LibraryState>,
     expected_root: String,

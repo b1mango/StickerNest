@@ -69,6 +69,10 @@ pub struct ManagementSnapshot {
     /// Similarity pairs the user chose to ignore; never re-suggested.
     #[serde(default)]
     pub ignored_pairs: Vec<(String, String)>,
+    /// Named collections that exist even before any asset carries them, so a
+    /// brand-new empty collection can be built up afterwards.
+    #[serde(default)]
+    pub collections: Vec<String>,
 }
 impl Default for ManagementSnapshot {
     fn default() -> Self {
@@ -81,6 +85,7 @@ impl Default for ManagementSnapshot {
             trash: BTreeMap::new(),
             groups: vec![],
             ignored_pairs: vec![],
+            collections: vec![],
         }
     }
 }
@@ -242,6 +247,15 @@ impl Library {
             }
             self.asset_path(a)?;
             self.asset_path(b)?;
+        }
+        let mut named = HashSet::new();
+        for name in &m.collections {
+            if !text_valid(name, 50, false) || !named.insert(name.as_str()) {
+                return Err("管理文件合集名册无效".into());
+            }
+        }
+        if m.collections.len() > 100 {
+            return Err("管理文件合集名册超限".into());
         }
         Ok(())
     }
@@ -424,6 +438,24 @@ impl Library {
         } else {
             m.metadata.insert(asset_id, meta);
         }
+        self.write_management(&m)?;
+        Ok(m)
+    }
+    pub fn add_collection_name(
+        &self,
+        expected_root: &str,
+        name: String,
+    ) -> Result<ManagementSnapshot, String> {
+        self.check_expected_root(expected_root)?;
+        let name = name.trim().to_string();
+        if !text_valid(&name, 50, false) {
+            return Err("合集名称为 1–50 字，不能含控制字符".into());
+        }
+        let mut m = self.get_management()?;
+        if m.collections.iter().any(|c| c == &name) {
+            return Ok(m);
+        }
+        m.collections.push(name);
         self.write_management(&m)?;
         Ok(m)
     }

@@ -57,6 +57,7 @@ export interface ManagementSnapshot {
   trash: Record<string, number>;
   groups: VersionGroup[];
   ignoredPairs: [string, string][];
+  collections: string[];
 }
 
 export interface AnimationPair {

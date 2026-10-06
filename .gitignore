@@ -15,3 +15,9 @@ __pycache__/
 项目设计.md
 项目进度.md
 对话记录.md
+
+# 设计/改版方案类工作文档与概念稿也不入库
+外观改版方案.md
+*.设计方案.md
+.icon-design/
+.interface-design/
