@@ -428,7 +428,16 @@ fn wechat_db_urls(app: &tauri::AppHandle, wxid: &str) -> Result<WeChatUrlsResult
     if !db_path.is_file() {
         return Err("该账号没有找到表情数据库".into());
     }
-    let stage_dir = root.join("downloads/wechat");
+    let library_root = {
+        let state = app.state::<LibraryState>();
+        let current = state.0.lock().map_err(|_| "资料库忙")?;
+        current
+            .as_ref()
+            .ok_or("请先打开资料库")?
+            .snapshot()
+            .root
+    };
+    let stage_dir = Path::new(&library_root).join("downloads/wechat");
     std::fs::create_dir_all(&stage_dir).map_err(|e| e.to_string())?;
     let urls_path = stage_dir.join("emoticon_urls.txt");
 
@@ -447,7 +456,7 @@ fn wechat_db_urls(app: &tauri::AppHandle, wxid: &str) -> Result<WeChatUrlsResult
     };
     let effective_db = root
         .parent()
-        .unwrap_or(&root)
+        .ok_or("微信数据目录结构异常")?
         .join(&owner)
         .join("db_storage/emoticon/emoticon.db");
     let db_path = if effective_db.is_file() { effective_db } else { db_path };
