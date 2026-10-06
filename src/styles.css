@@ -78,7 +78,16 @@ h1 { display: flex; align-items: center; gap: 14px; font-size: 26px; font-weight
 .search-field input::placeholder { color: var(--ink-muted); }
 .import-controls { display: flex; gap: 12px; align-items: center; }
 .source-select { display: flex; align-items: center; gap: 8px; color: var(--ink-secondary); font-size: 11px; white-space: nowrap; }
-.source-select select { max-width: 120px; height: 44px; border-radius: var(--radius-control); border: 1px solid var(--rule); background: var(--paper-raised); color: var(--ink); padding: 0 8px; font-size: 12px; }
+.source-select select { max-width: 140px; height: 40px; border-radius: var(--radius-control); border: 1px solid var(--rule); background: var(--paper-inset) var(--chevron-down) no-repeat right 8px center / 14px 14px; color: var(--ink); padding: 0 28px 0 10px; font-size: 12px; appearance: none; -webkit-appearance: none; }
+.source-select select:hover:not(:disabled) { border-color: var(--rule-strong); }
+.source-select select:focus-visible { outline: 2px solid var(--ring-focus); outline-offset: 1px; }
+.source-select select:disabled { opacity: .48; }
+.management-filters select { height: 36px; font-size: 12px; padding: 0 28px 0 10px; max-width: 180px; border-radius: var(--radius-control); border: 1px solid var(--rule); background: var(--paper-inset) var(--chevron-down) no-repeat right 8px center / 14px 14px; color: var(--ink); appearance: none; -webkit-appearance: none; }
+.management-filters select:hover:not(:disabled) { border-color: var(--rule-strong); }
+.management-filters select:focus-visible { outline: 2px solid var(--ring-focus); outline-offset: 1px; }
+:root {
+  --chevron-down: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23626d5f' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
 .button { border: 1px solid transparent; border-radius: var(--radius-control); min-height: 44px; padding: 10px 16px; display: inline-flex; justify-content: center; align-items: center; gap: 8px; font-size: 12px; font-weight: 550; white-space: nowrap; }
 .button.primary { background: var(--forest); color: var(--paper-raised); }
 .button.primary:hover:not(:disabled) { background: var(--forest-hover); }
