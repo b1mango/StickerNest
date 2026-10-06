@@ -37,7 +37,12 @@
       "icons/icon.png"
     ],
     "resources": {
-      "../tools/wechat-key-dumper/wechat-key-dumper.dylib": "wechat-key-dumper.dylib"
+      "../tools/wechat-key-dumper/wechat-key-dumper.dylib": "wechat-key-dumper.dylib",
+      "../tools/bookmark-helper/bookmark-helper.dylib": "bookmark-helper.dylib"
+    },
+    "macOS": {
+      "entitlements": "entitlements.plist",
+      "signingIdentity": "-"
     }
   }
 }

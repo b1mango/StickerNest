@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
-import { collectWechatImport, importWechatManifest, importProvenanceAtPath, wechatDetectAccounts, wechatCheckRunning, wechatDumpAndExport } from '../api';
+import { collectWechatImport, importWechatManifest, importProvenanceAtPath, wechatDetectAccounts, wechatCheckRunning, wechatDumpAndExport, wechatGrantBookmark } from '../api';
 import type { ImportReport, ManagementSnapshot } from '../types';
 
 const GUIDE = '在 Windows 电脑上登录微信，运行 wxemoticon（见步骤说明）导出 emoticon_urls.txt，把文件拷回 Mac，在这里选择它。下载只访问腾讯表情 CDN，不读聊天内容。';
@@ -38,6 +38,8 @@ export function WeChatImportDialog({ root, accounts, onSnapshot, onManagement, o
   const [wxAccounts, setWxAccounts] = useState<{ wxid: string; hasDb: boolean; hasCachedKey: boolean }[]>([]);
   const [selectedWxid, setSelectedWxid] = useState('');
   const [detecting, setDetecting] = useState(false);
+  const [needGrant, setNeedGrant] = useState(false);
+  const [granting, setGranting] = useState(false);
   const busy = state.phase === 'fetching' || state.phase === 'importing' || mapping;
   const dialog = useRef<HTMLDialogElement>(null);
   const mounted = useRef(true);
@@ -60,9 +62,36 @@ export function WeChatImportDialog({ root, accounts, onSnapshot, onManagement, o
       setSelectedWxid(first?.wxid ?? '');
     } catch (reason) {
       if (!mounted.current) return;
-      setDialogError(String(reason));
+      const message = String(reason);
+      // macOS 26 TCC blocks reading the WeChat container until the user grants
+      // a security-scoped bookmark — offer one click instead of a dead error.
+      if (message.includes('Operation not permitted') || message.includes('无法读取微信数据目录')) {
+        setNeedGrant(true);
+      } else {
+        setDialogError(message);
+      }
     } finally {
       if (mounted.current) setDetecting(false);
+    }
+  }
+
+  async function grantAccess() {
+    if (granting) return;
+    setGranting(true);
+    try {
+      await wechatGrantBookmark();
+      if (!mounted.current) return;
+      setNeedGrant(false);
+      setDialogError('');
+      await detectWxAccounts();
+    } catch (reason) {
+      if (!mounted.current) return;
+      const message = String(reason);
+      if (!message.includes('未选择目录') && !message.includes('Cancel')) {
+        setDialogError(message);
+      }
+    } finally {
+      if (mounted.current) setGranting(false);
     }
   }
 
@@ -176,7 +205,8 @@ export function WeChatImportDialog({ root, accounts, onSnapshot, onManagement, o
           <div className="native-dump">
             <h3>直接从本机获取</h3>
             <p className="field-hint">首次需要完全退出微信并在本机做一个一次性本地副本；之后会缓存密钥，后续每次获取都不打扰微信。仅读取表情数据库，不碰聊天内容。</p>
-            {wxAccounts.length === 0 ? <div className="batch-section"><button className="button secondary" disabled={detecting || busy || mapping} onClick={() => void detectWxAccounts()}>{detecting ? '正在检测…' : '检测本机微信账号'}</button></div> : <>
+            {needGrant ? <div className="trash-notice" role="alert"><p>macOS 还需要一次性授权：拾趣才能读取微信的表情数据。请在接下来弹出的文件夹选择里定位到微信的数据目录，点「打开」确认。只需要这一次，以后都会记住。</p><div className="editor-actions"><button className="button primary" disabled={granting || busy} onClick={() => void grantAccess()}>{granting ? '等待授权…' : '去授权'}</button><button className="button secondary" disabled={granting} onClick={() => setNeedGrant(false)}>稍后</button></div></div> : null}
+            {wxAccounts.length === 0 && !needGrant ? <div className="batch-section"><button className="button secondary" disabled={detecting || busy || mapping} onClick={() => void detectWxAccounts()}>{detecting ? '正在检测…' : '检测本机微信账号'}</button></div> : <>
               <label className="field-label">微信账号<select value={selectedWxid} disabled={busy || mapping} onChange={event => setSelectedWxid(event.target.value)}>{wxAccounts.filter(a => a.hasDb).map(account => <option key={account.wxid} value={account.wxid}>{account.wxid}{account.hasCachedKey ? '（密钥已缓存，免打扰）' : ''}</option>)}</select></label>
               {dump.phase === 'idle' ? <div className="editor-actions"><button className="button primary" disabled={busy || mapping || !selectedWxid} onClick={() => void dumpNative()}>直接从本机获取表情清单</button></div> : null}
               {dump.phase === 'running' ? <p role="status">{dump.note}…</p> : null}

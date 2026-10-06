@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod bookmark;
 pub mod library;
 pub mod management;
 pub mod similar;
@@ -346,12 +347,21 @@ async fn collect_douyin_import(app: tauri::AppHandle) -> Result<CollectImportRes
 
 /// Scripts live next to the project, both in `tauri dev` (cwd = src-tauri)
 /// and when started from the project root. Double-clicking the .app leaves
-/// cwd elsewhere; report the searched roots so the user knows to use
-/// `npm run desktop` from the project directory.
+/// cwd elsewhere; probe from the executable's ancestors as well.
 fn scripts_dir() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    for candidate in [cwd.join("scripts"), cwd.join("../scripts")] {
-        if candidate.join("collect_douyin.mjs").is_file() {
+    let mut candidates = vec![cwd.join("scripts"), cwd.join("../scripts")];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(anchor) = exe.parent() {
+            for ancestor in anchor.ancestors() {
+                candidates.push(ancestor.join("scripts"));
+            }
+        }
+    }
+    for candidate in candidates {
+        if candidate.join("collect_douyin.mjs").is_file()
+            || candidate.join("download_wechat.py").is_file()
+        {
             return candidate;
         }
     }
@@ -397,6 +407,12 @@ fn wechat_check_running(app: tauri::AppHandle) -> usize {
         wechat::WeChatRunning::NotRunning => 0,
         wechat::WeChatRunning::Running(n) => n,
     }
+}
+
+#[tauri::command]
+fn wechat_grant_bookmark(path: String) -> Result<String, String> {
+    crate::bookmark::store_bookmark(&path)?;
+    Ok(path)
 }
 
 #[tauri::command]
@@ -546,7 +562,8 @@ pub fn run() {
             collect_wechat_import,
             wechat_detect_accounts,
             wechat_check_running,
-            wechat_dump_and_export
+            wechat_dump_and_export,
+            wechat_grant_bookmark
         ])
         .run(tauri::generate_context!())
         .expect("无法启动拾趣桌面应用");

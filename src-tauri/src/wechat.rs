@@ -44,6 +44,11 @@ fn home_dir() -> Result<PathBuf, String> {
 }
 
 fn xwechat_files_root() -> Result<PathBuf, String> {
+    // Prefer the security-scoped bookmark the user granted; fall back to the
+    // canonical path (useful when the app already holds full-disk access).
+    if let Ok(Some(bookmarked)) = crate::bookmark::stored_bookmark_root() {
+        return Ok(bookmarked);
+    }
     Ok(home_dir()?.join(
         "Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files",
     ))

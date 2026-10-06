@@ -119,6 +119,12 @@ export async function wechatDumpAndExport(wxid: string): Promise<{ urlsTxt: stri
   return invoke('wechat_dump_and_export', { wxid });
 }
 
+export async function wechatGrantBookmark(): Promise<string> {
+  const path = await open({ directory: true, multiple: false, title: '授权访问微信数据（选择微信数据目录）' });
+  if (!path || typeof path !== 'string') throw new Error('未选择目录');
+  return invoke<string>('wechat_grant_bookmark', { path });
+}
+
 export async function ignorePair(expectedRoot: string, assetA: string, assetB: string): Promise<import('./types').ManagementSnapshot> {
   return invoke('ignore_pair', { expectedRoot, assetA, assetB });
 }
