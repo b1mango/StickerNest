@@ -227,9 +227,9 @@ h1 { display: flex; align-items: center; gap: 14px; font-size: 26px; font-weight
 
 /* 选中系统：44px 命中的自绘圆形复选 + 卡片染色。hover 与选中严格区分：
    hover 只加深边框，选中方获得森林绿底与实心勾。 */
-.select-box { position: absolute; top: 10px; left: 10px; width: 22px; height: 22px; margin: 0; padding: 0; appearance: none; -webkit-appearance: none; border: 1.5px solid var(--rule-strong); border-radius: 50%; background: color-mix(in srgb, var(--paper-raised) 78%, transparent); opacity: 0; z-index: 2; transition: opacity .12s ease-out, background-color .12s ease-out, border-color .12s ease-out; }
+.select-box { position: absolute; top: 10px; left: 10px; width: 22px; height: 22px; margin: 0; padding: 0; appearance: none; -webkit-appearance: none; border: 1.5px solid var(--rule-strong); border-radius: 6px; background: color-mix(in srgb, var(--paper-raised) 82%, transparent); opacity: 0; z-index: 2; transition: opacity .12s ease-out, background-color .12s ease-out, border-color .12s ease-out; }
 .select-box::before { content: ''; position: absolute; inset: -11px; }
-.select-box:checked { opacity: 1; background: var(--forest); border-color: var(--forest); background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fffefa' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E"); background-size: 12px; background-position: center; background-repeat: no-repeat; }
+.select-box:checked { opacity: 1; background: var(--forest); border-color: var(--forest); background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fffefa' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E"); background-size: 14px; background-position: center; background-repeat: no-repeat; }
 .sticker-cell:hover .select-box, .select-box:focus-visible { opacity: 1; }
 .sticker-card.checked .sticker-image { border-color: var(--forest); background: var(--forest-wash); }
 .sticker-card.checked .sticker-image img { opacity: .9; }
@@ -309,3 +309,7 @@ h1 { display: flex; align-items: center; gap: 14px; font-size: 26px; font-weight
 .context-item.danger { color: var(--danger); }
 .context-item:disabled { opacity: .48; }
 .context-sep { height: 1px; background: var(--rule); margin: 4px 6px; }
+
+
+.source-select.compact select { height: 40px; max-width: 160px; }
+.nav-divider { height: 1px; background: var(--rule); margin: 14px 8px 0; }
