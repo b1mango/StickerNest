@@ -34,7 +34,26 @@ static account_salt g_accounts[MAX_ACCOUNTS];
 static size_t g_account_count = 0;
 static char g_key_out[1024] = {0};
 static char g_target_wxid[128] = {0};
+static char g_log_out[1024] = {0};
 static bool g_done = false;
+
+static void log_line(const char *tag, const char *detail) {
+    if (!g_log_out[0]) return;
+    int fd = open(g_log_out, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) return;
+    char line[1536];
+    int n = snprintf(line, sizeof(line), "%s %s\n", tag, detail);
+    (void)!write(fd, line, (size_t)n);
+    close(fd);
+}
+static void log_hex(const char *tag, const unsigned char *bytes, size_t n) {
+    if (!g_log_out[0]) return;
+    char hex[257];
+    size_t take = n > 128 ? 128 : n;
+    for (size_t i = 0; i < take; i++) snprintf(hex + i * 2, 3, "%02x", bytes[i]);
+    hex[take * 2] = '\0';
+    log_line(tag, hex);
+}
 
 static bool read_file_prefix(const char *path, unsigned char *out, size_t len) {
     int fd = open(path, O_RDONLY);
@@ -83,16 +102,21 @@ static bool salt_matches(const unsigned char *salt) {
     return false;
 }
 
-static void write_key_hex(const unsigned char *bytes, size_t n) {
-    if (g_done || !g_key_out[0] || n == 0 || n > (KEY_HEX_MAX / 2)) return;
+static void log_key_candidate(const char *tag, const unsigned char *bytes, size_t n) {
+    if (!g_log_out[0] || n == 0 || n > (KEY_HEX_MAX / 2)) return;
     char hex[KEY_HEX_MAX + 1];
     for (size_t i = 0; i < n; i++) snprintf(hex + i * 2, 3, "%02x", bytes[i]);
     hex[n * 2] = '\0';
-    int fd = open(g_key_out, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) return;
-    (void)!write(fd, hex, strlen(hex));
-    close(fd);
-    g_done = true;
+    if (!g_done && g_key_out[0]) {
+        int fd = open(g_key_out, O_WRONLY | O_CREAT | O_APPEND, 0600);
+        if (fd >= 0) {
+            char line[KEY_HEX_MAX + 4];
+            int len = snprintf(line, sizeof(line), "%s:%s\n", tag, hex);
+            (void)!write(fd, line, (size_t)len);
+            close(fd);
+        }
+    }
+    log_hex(tag, bytes, n);
 }
 
 // ---- CCKeyDerivationPBKDF hook: WeChat 4.1+ derives the key via PBKDF2 with
@@ -110,7 +134,7 @@ static int hook_CCKeyDerivationPBKDF(CCPBKDFAlgorithm algorithm, const char *pas
         && password && passwordLen > 0 && passwordLen <= (KEY_HEX_MAX / 2)
         && strlen(password) == passwordLen) {
         // passphrase form: capture the ASCII passphrase, downstream derives it.
-        write_key_hex((const unsigned char *)password, passwordLen);
+        log_key_candidate("P", (const unsigned char *)password, passwordLen);
     }
     return result;
 }
@@ -120,7 +144,7 @@ static int (*orig_sqlite3_key)(void *db, const void *pKey, int nKey);
 static int hook_sqlite3_key(void *db, const void *pKey, int nKey) {
     int result = orig_sqlite3_key(db, pKey, nKey);
     if (!g_done && pKey && nKey > 0 && nKey <= (KEY_HEX_MAX / 2)) {
-        write_key_hex(pKey, (size_t)nKey);
+        log_key_candidate("K", (const unsigned char *)pKey, (size_t)nKey);
     }
     return result;
 }
@@ -129,7 +153,7 @@ static int (*orig_sqlite3_key_v2)(void *db, const char *zDbName, const void *pKe
 static int hook_sqlite3_key_v2(void *db, const char *zDbName, const void *pKey, int nKey) {
     int result = orig_sqlite3_key_v2(db, zDbName, pKey, nKey);
     if (!g_done && pKey && nKey > 0 && nKey <= (KEY_HEX_MAX / 2)) {
-        write_key_hex(pKey, (size_t)nKey);
+        log_key_candidate("K", (const unsigned char *)pKey, (size_t)nKey);
     }
     return result;
 }
@@ -140,7 +164,10 @@ static void sn_dumper_init(void) {
     if (out) snprintf(g_key_out, sizeof(g_key_out), "%s", out);
     const char *target = getenv("SN_TARGET_WXID");
     if (target) snprintf(g_target_wxid, sizeof(g_target_wxid), "%s", target);
+    const char *logp = getenv("SN_LOG_OUT");
+    if (logp) snprintf(g_log_out, sizeof(g_log_out), "%s", logp);
     scan_accounts();
+    { char note[256]; snprintf(note, sizeof(note), "accounts:%zu target:%s", g_account_count, g_target_wxid); log_line("init", note); }
 
     struct rebinding bindings[] = {
         {"CCKeyDerivationPBKDF", hook_CCKeyDerivationPBKDF, (void **)&orig_CCKeyDerivationPBKDF},

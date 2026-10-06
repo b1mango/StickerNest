@@ -432,20 +432,31 @@ fn wechat_db_urls(app: &tauri::AppHandle, wxid: &str) -> Result<WeChatUrlsResult
     std::fs::create_dir_all(&stage_dir).map_err(|e| e.to_string())?;
     let urls_path = stage_dir.join("emoticon_urls.txt");
 
-    let (key, used_cached) = match wechat::cached_key(wxid)? {
-        Some(key) => (key, true),
+    let (candidates, used_cached) = match wechat::cached_key(wxid)? {
+        Some(candidates) => (candidates, true),
         None => {
-            let key = wechat::dump_key(wxid, &mut |_note| {})?;
-            (key, false)
+            let candidates = wechat::dump_key(wxid, &mut |_note| {})?;
+            (candidates, false)
         }
     };
-    let count = match wechat_db::export_urls(&db_path, &key, &urls_path) {
+    // The dump may have landed on another account's emoticon.db; resolve the
+    // owner of these candidates before decrypting (clone-login wxid may differ).
+    let owner = match wechat::resolve_candidate_account(&candidates) {
+        Ok(owner) => owner,
+        Err(_) => wxid.to_string(),
+    };
+    let effective_db = root
+        .parent()
+        .unwrap_or(&root)
+        .join(&owner)
+        .join("db_storage/emoticon/emoticon.db");
+    let db_path = if effective_db.is_file() { effective_db } else { db_path };
+    let count = match wechat_db::export_urls(&db_path, &candidates, &urls_path) {
         Ok(count) => count,
         Err(e) if used_cached => {
-            // Cached key no longer decrypts: refresh it once, then retry.
+            // Cached candidates no longer decrypt: refresh them once, then retry.
             let fresh = wechat::dump_key(wxid, &mut |_note| {})?;
-            let key = fresh;
-            match wechat_db::export_urls(&db_path, &key, &urls_path) {
+            match wechat_db::export_urls(&db_path, &fresh, &urls_path) {
                 Ok(count) => count,
                 Err(e2) => return Err(e2),
             }

@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 
 MAX_BYTES = 20 * 1024 * 1024
+CDN_HOSTS = {'vweixinf.tc.qq.com', 'wxapp.tc.qq.com'}
 ALLOWED_SUFFIXES = ('.qpic.cn', '.qlogo.cn')
 EXTENSIONS = {'PNG': 'png', 'JPEG': 'jpg', 'GIF': 'gif', 'WEBP': 'webp'}
 MAGIC = [
@@ -38,9 +39,13 @@ def check_url(url):
     try:
         parsed = urllib.parse.urlsplit(url)
         host = parsed.hostname or ''
-        valid = (parsed.scheme == 'https' and parsed.port in (None, 443)
+        # WeChat CDN serves stickers over plain http; its https cert is broken
+        # for this host, so both schemes are accepted for the allowlist.
+        valid = (parsed.scheme in ('http', 'https')
                  and not parsed.username and not parsed.password
-                 and any(host == s.lstrip('.') or host.endswith(s) for s in ALLOWED_SUFFIXES))
+                 and (host in CDN_HOSTS
+                      or any(host == s.lstrip('.') or host.endswith(s)
+                             for s in ALLOWED_SUFFIXES)))
     except (ValueError, TypeError):
         valid = False
     if not valid:

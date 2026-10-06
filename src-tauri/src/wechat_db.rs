@@ -7,46 +7,27 @@ use sha2::{Digest, Sha512};
 use std::{collections::HashSet, fs, path::PathBuf};
 
 const PAGE_SIZE: usize = 4096;
+const IV_SIZE: usize = 16;
 const RESERVE: usize = 80;
 const PBKDF2_ITER: u32 = 256_000;
+const MAC_ROUNDS: u32 = 2;
 const KEY_LEN: usize = 32;
+const MAC_LEN: usize = 64;
+const SALT_LEN: usize = 16;
+const SQLITE_HEADER: &[u8] = b"SQLite format 3";
 
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+type HmacSha512 = Hmac<Sha512>;
 
 pub struct DecryptedDb {
     pub pages: Vec<Vec<u8>>,
     pub page_count: usize,
 }
 
-fn pbkdf(password: &[u8], salt: &[u8]) -> [u8; KEY_LEN * 2] {
-    let mut out = [0u8; KEY_LEN * 2];
-    pbkdf2::pbkdf2_hmac::<Sha512>(password, salt, PBKDF2_ITER, &mut out);
+fn pbkdf32(password: &[u8], salt: &[u8], rounds: u32) -> [u8; KEY_LEN] {
+    let mut out = [0u8; KEY_LEN];
+    pbkdf2::pbkdf2_hmac::<Sha512>(password, salt, rounds, &mut out);
     out
-}
-
-/// Decrypt one SQLCipher 4.x page. Layout:
-/// [ payload (PAGE_SIZE - RESERVE) | iv (16) | tag (32) | reserve pad (RESERVE-48) ]
-fn decrypt_page(key: &[u8], page: &[u8], page_no: u64) -> Option<Vec<u8>> {
-    if page.len() != PAGE_SIZE {
-        return None;
-    }
-    let (payload, rest) = page.split_at(PAGE_SIZE - RESERVE);
-    let (iv_bytes, tag_bytes) = rest.split_at(16);
-    let tag_expected = &tag_bytes[..32];
-
-    let mut mac = <Hmac<Sha512> as Mac>::new_from_slice(key).ok()?;
-    mac.update(payload);
-    mac.update(iv_bytes);
-    mac.update(&page_no.to_le_bytes());
-    let tag: [u8; 64] = mac.finalize().into_bytes().into();
-    if tag[..32] != tag_expected[..] {
-        return None;
-    }
-    let mut buf = payload.to_vec();
-    Aes256CbcDec::new(key[..32].into(), iv_bytes.into())
-        .decrypt_padded_mut::<NoPadding>(&mut buf)
-        .ok()?;
-    Some(buf)
 }
 
 /// Parse the output of `sqlite3_key`'s raw key (64 hex chars) or a passphrase.
@@ -67,38 +48,74 @@ pub fn parse_key_material(text: &str) -> Option<Vec<u8>> {
 
 pub fn decrypt_db(path: &PathBuf, key_material: &str) -> Result<DecryptedDb, String> {
     let raw = fs::read(path).map_err(|e| format!("无法读取表情数据库:{e}"))?;
+    if raw.starts_with(SQLITE_HEADER) {
+        let pages = raw.chunks(PAGE_SIZE).map(|p| p.to_vec()).collect::<Vec<_>>();
+        return Ok(DecryptedDb { page_count: pages.len(), pages });
+    }
     if raw.len() < PAGE_SIZE || raw.len() % PAGE_SIZE != 0 {
         return Err("表情数据库结构异常（页大小不符）".into());
     }
-    let salt = &raw[..16];
-    let candidates: Vec<Vec<u8>> = {
-        let mut v = vec![];
-        if let Some(pb) = parse_key_material(key_material) {
-            v.push(pbkdf(&pb, salt).to_vec());
-            // SQLCipher mac variant used by WeChat 4.x on Apple platforms.
-            let mac_salt: Vec<u8> = salt.iter().map(|b| b ^ 0x3a).collect();
-            v.push(pbkdf(&pb, &mac_salt).to_vec());
+    let salt: Vec<u8> = raw[..SALT_LEN].to_vec();
+    let mac_salt: Vec<u8> = salt.iter().map(|b| b ^ 0x3a).collect();
+
+    let mut candidates: Vec<[u8; KEY_LEN]> = vec![];
+    if let Some(pass) = parse_key_material(key_material) {
+        // pass-as-passphrase and pass-as-raw-key are both plausible; try both.
+        candidates.push(pbkdf32(&pass, &salt, PBKDF2_ITER));
+        if pass.len() == KEY_LEN {
+            let mut raw_key = [0u8; KEY_LEN];
+            raw_key.copy_from_slice(&pass);
+            candidates.push(raw_key);
         }
-        if let Some(raw_key) = parse_key_material(key_material).filter(|k| k.len() == 32) {
-            v.push(raw_key);
-            let mac_salt: Vec<u8> = salt.iter().map(|b| b ^ 0x3a).collect();
-            let _ = mac_salt;
-        }
-        v
-    };
-    let mut pages = Vec::with_capacity(raw.len() / PAGE_SIZE);
+    }
+    if candidates.is_empty() {
+        return Err("密钥格式无法识别".into());
+    }
+    let total_pages = raw.len() / PAGE_SIZE;
     for key in &candidates {
-        pages.clear();
+        let mac_key = pbkdf32(key, &mac_salt, MAC_ROUNDS);
+        let mut pages: Vec<Vec<u8>> = Vec::with_capacity(total_pages);
         let mut ok = true;
-        for (i, chunk) in raw.chunks(PAGE_SIZE).enumerate() {
-            let page_no = (i + 1) as u64;
-            match decrypt_page(key, chunk, page_no) {
-                Some(page) => pages.push(page),
-                None => {
+        for cur in 0..total_pages {
+            let offset = if cur == 0 { SALT_LEN } else { 0 };
+            let start = cur * PAGE_SIZE;
+            let end = start + PAGE_SIZE;
+            let iv_start = end - RESERVE;
+            let iv_end = iv_start + IV_SIZE;
+            let hmac_start = iv_end;
+            let hmac_end = hmac_start + MAC_LEN;
+            let content = &raw[start + offset..iv_start];
+            let iv = &raw[iv_start..iv_end];
+            let mut mac = match <HmacSha512 as Mac>::new_from_slice(&mac_key) {
+                Ok(mac) => mac,
+                Err(e) => return Err(format!("hmac 初始化失败:{e}")),
+            };
+            mac.update(&raw[start + offset..iv_end]);
+            mac.update(&((cur as u32) + 1).to_le_bytes());
+            let expected = mac.finalize().into_bytes();
+            if expected.as_slice() != &raw[hmac_start..hmac_end] {
+                ok = false;
+                break;
+            }
+            let mut buf = content.to_vec();
+            let plain = match Aes256CbcDec::new(key.into(), iv.into())
+                .decrypt_padded_mut::<NoPadding>(&mut buf)
+            {
+                Ok(plain) => plain.to_vec(),
+                Err(_) => {
                     ok = false;
                     break;
                 }
+            };
+            let mut page = Vec::with_capacity(PAGE_SIZE);
+            if cur == 0 {
+                page.extend_from_slice(SQLITE_HEADER);
+                page.push(0x00);
             }
+            page.extend_from_slice(&plain);
+            // Reserve bytes stay as-is so sqlite's page layout is preserved.
+            page.extend_from_slice(&raw[iv_start..end]);
+            pages.push(page);
         }
         if ok {
             let page_count = pages.len();
@@ -109,33 +126,44 @@ pub fn decrypt_db(path: &PathBuf, key_material: &str) -> Result<DecryptedDb, Str
 }
 
 /// Collect favourite emoticon URLs by reading the decrypted pages as SQLite.
-/// `conn` path uses the decrypted page cache written to a temp file.
+/// Each candidate is tried first as a raw cipher key, then as a passphrase
+/// derived via PBKDF2 — the first one whose per-page HMAC verifies wins.
 pub fn export_urls(
     db_path: &PathBuf,
-    key_material: &str,
+    key_candidates: &[String],
     out_path: &PathBuf,
 ) -> Result<usize, String> {
-    let decrypted = decrypt_db(db_path, key_material)?;
+    let mut last_err = String::new();
+    let mut decrypted = None;
+    for candidate in key_candidates {
+        match decrypt_db(db_path, candidate) {
+            Ok(d) => {
+                decrypted = Some(d);
+                break;
+            }
+            Err(e) => last_err = e,
+        }
+    }
+    let decrypted = decrypted.ok_or(if last_err.is_empty() {
+        "没有可尝试的密钥候选".to_string()
+    } else {
+        last_err
+    })?;
     let temp_dir = out_path
         .parent()
         .ok_or_else(|| "清单输出路径无效".to_string())?;
     fs::create_dir_all(temp_dir).map_err(|e| e.to_string())?;
-    let plain = tempfile::NamedTempFile::new_in(temp_dir).map_err(|e| e.to_string())?;
-    let plain_path = plain.path().to_path_buf();
-    for page in &decrypted.pages {
+    let plain_path = temp_dir.join(".stickernest-decrypted.tmp");
+    {
         use std::io::Write;
-        // Rewrite as contiguous plaintext SQLite image.
-        // Restore reserve area with zeros to satisfy sqlite's page layout.
-        let mut full = page.clone();
-        full.extend_from_slice(&[0u8; RESERVE]);
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&plain_path)
-            .map_err(|e| e.to_string())?
-            .write_all(&full)
-            .map_err(|e| e.to_string())?;
+        let mut file = fs::File::create(&plain_path).map_err(|e| e.to_string())?;
+        for page in &decrypted.pages {
+            // Pages are already full-width (decrypt_db keeps the 80-byte
+            // reserve tail), so write them sequentially into one plain db.
+            file.write_all(page).map_err(|e| e.to_string())?;
+        }
+        file.sync_all().map_err(|e| e.to_string())?;
     }
-    drop(plain);
     let urls = query_fav_urls(&plain_path)?;
     let _ = fs::remove_file(&plain_path);
     use std::io::Write;

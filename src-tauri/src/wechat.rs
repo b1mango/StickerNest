@@ -14,7 +14,7 @@ use std::{
 };
 
 const DYLIB_NAME: &str = "wechat-key-dumper.dylib";
-const DYLIB_SHA256: &str = "91f8dc623a32a122314d49fe1b0d6427369ef78431cc950d49cf0220a4ea76df";
+const DYLIB_SHA256: &str = "af9f8342f1afbc3dea374e6d329a8697fd111e61e48b603ff01276aa5876fd88";
 const KEY_TIMEOUT: Duration = Duration::from_secs(600);
 const POLL_STEP: Duration = Duration::from_secs(3);
 
@@ -60,17 +60,16 @@ fn app_support_root() -> Result<PathBuf, String> {
 pub fn dylib_path() -> Result<PathBuf, String> {
     // Prefer the packaged resource; fall back to the source build in dev.
     let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let exe = std::env::current_exe().ok();
     let mut candidates = vec![
         dir.join("tools/wechat-key-dumper").join(DYLIB_NAME),
         dir.join("../tools/wechat-key-dumper").join(DYLIB_NAME),
     ];
-    if let Some(exe) = exe {
-        if let Some(resources) = exe.parent().and_then(|p| p.parent()).map(|p| p.join("Resources")) {
-            candidates.push(resources.join(DYLIB_NAME));
-        }
-        if let Some(contents) = exe.parent().and_then(|p| p.parent()).and_then(|r| r.parent()) {
-            candidates.push(contents.join("Resources").join(DYLIB_NAME));
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(anchor) = exe.parent() {
+            for ancestor in anchor.ancestors() {
+                candidates.push(ancestor.join("tools/wechat-key-dumper").join(DYLIB_NAME));
+                candidates.push(ancestor.join("Resources").join(DYLIB_NAME));
+            }
         }
     }
     for candidate in &candidates {
@@ -132,21 +131,44 @@ fn cached_key_path(wxid: &str) -> Result<PathBuf, String> {
     Ok(app_support_root()?.join(format!("emoticon_dbkey_{safe}.txt")))
 }
 
-pub fn cached_key(wxid: &str) -> Result<Option<String>, String> {
+/// Cached dumper hits: each candidate is stored as `<tag>:<hex>` (P for a
+/// PBKDF2-derived passphrase, K for a raw sqlite3_key call). This returns the
+/// candidate materials without the tags, PBKDF2 form first then raw.
+pub fn cached_key(wxid: &str) -> Result<Option<Vec<String>>, String> {
     let path = cached_key_path(wxid)?;
     if !path.is_file() {
         return Ok(None);
     }
-    let key = fs::read_to_string(&path).map_err(|e| err("无法读取密钥缓存", e))?;
-    Ok(Some(key.trim().to_string()))
+    let text = fs::read_to_string(&path).map_err(|e| err("无法读取密钥缓存", e))?;
+    let mut pass = vec![];
+    let mut raw = vec![];
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (tag, value) = line.split_once(':').unwrap_or(("", line));
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            continue;
+        }
+        if tag == "P" {
+            pass.push(value);
+        } else {
+            raw.push(value);
+        }
+    }
+    let mut out = pass;
+    out.extend(raw);
+    Ok(if out.is_empty() { None } else { Some(out) })
 }
 
-fn write_cached_key(wxid: &str, key: &str) -> Result<PathBuf, String> {
+fn write_cached_candidates(wxid: &str, candidates_text: &str) -> Result<PathBuf, String> {
     let dir = app_support_root()?;
     fs::create_dir_all(&dir).map_err(|e| err("无法创建应用支持目录", e))?;
     let path = cached_key_path(wxid)?;
     let mut temp = tempfile::NamedTempFile::new_in(&dir).map_err(|e| err("无法写入密钥缓存", e))?;
-    temp.write_all(key.trim().as_bytes())
+    temp.write_all(candidates_text.as_bytes())
         .map_err(|e| err("无法写入密钥缓存", e))?;
     temp.as_file()
         .sync_all()
@@ -259,13 +281,13 @@ fn terminate_child(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// Capture the emoticon key for the target account by starting the resigned
-/// clone under our dylib. Returns the raw key/passphrase text. `on_stage`
-/// receives short stage notes for the UI.
+/// Capture key candidates for the target account by starting the resigned
+/// clone under our dylib. All candidates the hook saw are appended into one
+/// file; the caller validates which actually decrypts the emoticon database.
 pub fn dump_key(
     wxid: &str,
     on_stage: &mut dyn FnMut(&str),
-) -> Result<String, String> {
+) -> Result<Vec<String>, String> {
     if !wxid.starts_with("wxid_") || wxid.len() > 64 {
         return Err("微信账号标识无效".into());
     }
@@ -292,34 +314,40 @@ pub fn dump_key(
         .spawn()
         .map_err(|e| err("无法启动微信本地副本", e))?;
     let deadline = Instant::now() + KEY_TIMEOUT;
-    let key = loop {
+    let data = loop {
         if key_out.is_file() {
             let data = fs::read_to_string(&key_out).map_err(|e| err("无法读取密钥输出", e))?;
-            let key = data.trim().to_string();
-            terminate_child(&mut child);
-            break match key.as_str() {
-                "REBIND_FAILED" => Err("密钥捕获组件未能接入微信（请反馈微信与系统版本）".into()),
-                _ if key.len() >= 32 => Ok(key),
-                _ => Err("微信未提供有效密钥，请再试一次".into()),
-            };
+            if !data.trim().is_empty() {
+                terminate_child(&mut child);
+                break data;
+            }
         }
         match child.try_wait() {
-            Ok(Some(_)) => break Err("微信本地副本提前退出，未取得密钥".into()),
+            Ok(Some(_)) => break return Err("微信本地副本提前退出，未取得密钥".into()),
             Ok(None) => (),
-            Err(e) => break Err(format!("无法监视微信本地副本：{e}")),
+            Err(e) => break return Err(format!("无法监视微信本地副本：{e}")),
         }
         if Instant::now() >= deadline {
             terminate_child(&mut child);
-            break Err("等待密钥超时（10 分钟）。请重试；若仍失败，请在微信里打开一次表情面板再试".into());
+            break return Err("等待密钥超时（10 分钟）。请重试；若仍失败，请在微信里打开一次表情面板再试".into());
         }
         std::thread::sleep(POLL_STEP);
-    }?;
-    // The clone may report a different account than the one selected.
-    let normalized = key.trim();
-    let key_hex = normalized.to_string();
-    write_cached_key(wxid, &key_hex)?;
+    };
+    let mut out = vec![];
+    for line in data.lines() {
+        let line = line.trim();
+        if let Some((_, value)) = line.split_once(':') {
+            out.push(value.trim().to_string());
+        } else if !line.is_empty() {
+            out.push(line.to_string());
+        }
+    }
+    // Cache under whichever account the candidates actually decrypt; when the
+    // clone logged into the selected account this is the requesting wxid.
+    let owner = resolve_candidate_account(&out).unwrap_or_else(|_| wxid.to_string());
+    write_cached_candidates(&owner, &data)?;
     let _ = fs::remove_file(&key_out);
-    Ok(key_hex)
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -335,4 +363,28 @@ mod tests {
         assert!(dump_key("notanaccount", &mut |_| {}).is_err());
         assert!(dump_key(&"x".repeat(100), &mut |_| {}).is_err());
     }
+}
+
+/// Match captured candidates against every local emoticon database and return
+/// the wxid they actually decrypt, so the cache always lands under the right
+/// account even when the clone logged into a different one.
+pub fn resolve_candidate_account(candidates: &[String]) -> Result<String, String> {
+    let root = xwechat_files_root()?;
+    for entry in fs::read_dir(&root).map_err(|e| err("无法读取微信数据目录", e))?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("wxid_") {
+            continue;
+        }
+        let db = entry.path().join("db_storage/emoticon/emoticon.db");
+        if !db.is_file() {
+            continue;
+        }
+        if candidates
+            .iter()
+            .any(|c| crate::wechat_db::decrypt_db(&db, c).is_ok())
+        {
+            return Ok(name);
+        }
+    }
+    Err("没有候选密钥能解密本机任何账号的表情数据库".into())
 }

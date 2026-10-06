@@ -10,7 +10,7 @@ fn main() {
             stickernest_lib::wechat::WeChatRunning::Running(n) => println!("wechat: running x{n}"),
         }
         let key = stickernest_lib::wechat::dump_key(&wxid, &mut |note| println!("stage: {note}"))?;
-        println!("key captured, {} chars", key.trim().len());
+        println!("candidates captured: {}", key.len());
         Ok::<(), String>(())
     })();
     match code {
