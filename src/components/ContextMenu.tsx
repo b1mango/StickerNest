@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { ChevronRight, X } from 'lucide-react';
+import { ChevronRight } from 'lucide-react';
 
 export interface ContextMenuItem {
   key: string;
@@ -40,8 +40,14 @@ export function ContextMenu({ x, y, items, onClose }: {
   const root = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const handler = (event: MouseEvent | KeyboardEvent) => {
-      if (event instanceof KeyboardEvent && event.key !== 'Escape') return;
-      if (event instanceof MouseEvent && root.current?.contains(event.target as Node)) return;
+      if (event instanceof KeyboardEvent) {
+        if (event.key !== 'Escape') return;
+        // 拦截这次 Esc，避免 window 上的「清除选择」同拍触发
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (root.current?.contains(event.target as Node)) return;
       onClose();
     };
     // Capture phase: the click that opened this menu is still bubbling when the
@@ -56,7 +62,7 @@ export function ContextMenu({ x, y, items, onClose }: {
     };
   }, [onClose]);
 
-  const totalHeight = items.length * ITEM_HEIGHT + items.filter(i => i.key.startsWith('sep')).length * 10 + 44;
+  const totalHeight = items.length * ITEM_HEIGHT + items.filter(i => i.key.startsWith('sep')).length * 10 + 12;
   let left = x;
   let top = y;
   if (left + WIDTH > window.innerWidth - 12) left = window.innerWidth - WIDTH - 12;
@@ -67,9 +73,6 @@ export function ContextMenu({ x, y, items, onClose }: {
 
   return (
     <div ref={root} className={`context-menu${flip ? ' sub-left' : ''}`} role="menu" style={{ left, top }}>
-      <div className="context-menu-head">
-        <button className="icon-button slim" aria-label="关闭菜单" onClick={onClose}><X size={13} /></button>
-      </div>
       <SubItems items={items} onClose={onClose} />
     </div>
   );

@@ -5,7 +5,7 @@ import { SOURCE_LABELS, formatBytes, type ExportSummary, type ImportReport, type
 import { StickerDetail } from './components/StickerDetail';
 import { StickerPreview } from './components/StickerPreview';
 import { ManagementPanel } from './components/ManagementPanel';
-import { DuplicateReview } from './components/DuplicateReview';
+import { SimilarReview } from './components/SimilarReview';
 import { BatchPanel } from './components/BatchPanel';
 import { ContextMenu, type ContextMenuItem } from './components/ContextMenu';
 import { CollectDialog } from './components/CollectDialog';
@@ -90,7 +90,6 @@ export default function App() {
   const [backupNotice, setBackupNotice] = useState<{ text: string; path: string } | null>(null);
   const [exportNotice, setExportNotice] = useState<ExportSummary | null>(null);
   const [scanReport, setScanReport] = useState<ScanReport | null>(null);
-  const [showSimilar, setShowSimilar] = useState(false);
   const [selected, setSelected] = useState<Sticker | null>(null);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -107,14 +106,25 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement>(null);
   const anchorId = useRef('');
   const marqueeState = useRef<{ x0: number; y0: number; base: Set<string>; active: boolean } | null>(null);
+  const autoScanRoot = useRef('');
+  const showMenuRef = useRef(showMenu);
+  showMenuRef.current = showMenu;
+  const ctxMenuRef = useRef(ctxMenu);
+  ctxMenuRef.current = ctxMenu;
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { setShowMenu(false); return; }
+      if (event.key === 'Escape') {
+        if (event.defaultPrevented || document.querySelector('dialog[open]')) return;
+        if (showMenuRef.current) { setShowMenu(false); return; }
+        if (ctxMenuRef.current) return; // 右键菜单自己的 Esc 处理（也会 preventDefault）
+        setCheckedIds(current => current.size ? new Set() : current);
+        return;
+      }
       const mod = event.metaKey || event.ctrlKey;
       if (!mod) return;
       if (event.key.toLowerCase() === 'f') { event.preventDefault(); searchRef.current?.focus(); searchRef.current?.select(); }
-      if (event.key.toLowerCase() === 'a' && sourceRef.current !== 'trash' && filteredRef.current.length) {
+      if (event.key.toLowerCase() === 'a' && inSelectable(sourceRef.current) && filteredRef.current.length) {
         event.preventDefault();
         setCheckedIds(new Set(filteredRef.current.map(item => item.id)));
       }
@@ -125,6 +135,28 @@ export default function App() {
   const filteredRef = useRef<Sticker[]>([]);
   const sourceRef = useRef(source);
   sourceRef.current = source;
+  function inSelectable(value: string) { return value !== 'trash' && value !== 'similar'; }
+
+  // 点击导入拆分按钮以外的地方时收起下拉
+  useEffect(() => {
+    if (!showMenu) return;
+    const onDown = (event: MouseEvent) => {
+      if (!(event.target as HTMLElement).closest('.import-split')) setShowMenu(false);
+    };
+    document.addEventListener('mousedown', onDown, true);
+    return () => document.removeEventListener('mousedown', onDown, true);
+  }, [showMenu]);
+
+  // 进入相似项对比页时自动扫描一次；之后保留/忽略只就地剔除，手动「重新扫描」才全量重扫
+  useEffect(() => {
+    if (source !== 'similar' || !library || !management || busy || !isDesktop) return;
+    if (autoScanRoot.current === library.root) return;
+    autoScanRoot.current = library.root;
+    void run('正在扫描相似项', async () => {
+      setScanReport(await scanDuplicates());
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source, library, management, busy]);
 
   useEffect(() => { localStorage.setItem(VIEW_KEY, view); }, [view]);
 
@@ -156,8 +188,9 @@ export default function App() {
   }
 
   async function applyLibrary(snapshot: Snapshot) {
-    setLibrary(snapshot); setManagementNotice(''); setManagement(null); setManagementError(''); setTag(''); setCollection(''); setReport(null); setSelected(null); setQuery(''); setSource('all'); setPage(1); setBackupNotice(null); setExportNotice(null); setScanReport(null); setShowSimilar(false); setCheckedIds(new Set()); setExpandedGroups(new Set()); setShowBatch(false); setIncludeVersions(false); setFocusId(''); setMarqueeRect(null);
+    setLibrary(snapshot); setManagementNotice(''); setManagement(null); setManagementError(''); setTag(''); setCollection(''); setReport(null); setSelected(null); setQuery(''); setSource('all'); setPage(1); setBackupNotice(null); setExportNotice(null); setScanReport(null); setCheckedIds(new Set()); setExpandedGroups(new Set()); setShowBatch(false); setIncludeVersions(false); setFocusId(''); setMarqueeRect(null);
     anchorId.current = '';
+    autoScanRoot.current = '';
     try { setManagement(await getManagement()); } catch (reason) { setManagementError(String(reason)); }
   }
 
@@ -195,8 +228,18 @@ export default function App() {
   function runScan() {
     void run('正在扫描相似项', async () => {
       setScanReport(await scanDuplicates());
-      setShowSimilar(true);
     });
+  }
+
+  /** 保留/忽略后就把涉及的条目从报告里剔除，避免全量重扫。 */
+  function pruneReviewed(doneIds: string[]) {
+    const done = new Set(doneIds);
+    setScanReport(current => current ? {
+      ...current,
+      exactGroups: current.exactGroups.filter(group => !group.assetIds.some(id => done.has(id))),
+      similarPairs: current.similarPairs.filter(pair => !done.has(pair.baseId) && !done.has(pair.otherId)),
+      animationPairs: current.animationPairs.filter(pair => !done.has(pair.baseId) && !done.has(pair.otherId)),
+    } : current);
   }
 
   async function keepOneAsset(_keepId: string, removedIds: string[]) {
@@ -204,12 +247,13 @@ export default function App() {
     // Others move to the recycle bin, recoverable any time from the trash view.
     setManagement(await setTrash(library.root, removedIds, true));
     setCheckedIds(current => new Set([...current].filter(id => !removedIds.includes(id))));
+    pruneReviewed(removedIds);
   }
 
   async function ignoreSimilarPair(a: string, b: string) {
     if (!library) throw new Error('请先打开资料库。');
     setManagement(await ignorePair(library.root, a, b));
-    // The caller re-scans once after the action, not here.
+    pruneReviewed([a, b]);
   }
 
   function exportSelection() {
@@ -393,9 +437,10 @@ export default function App() {
   const visiblePage = Math.min(page, totalPages);
   const visible = filtered.slice((visiblePage - 1) * PAGE_SIZE, visiblePage * PAGE_SIZE);
   const disabled = !!busy || !isDesktop;
-  const inSelectableView = source !== 'trash';
-  const heading = collection || (source === 'trash' ? '回收站' : (navigation.find(item => item.id === source)?.label ?? '全部表情'));
-  const headingCount = collection ? filtered.length : (counts[source] ?? filtered.length);
+  const inSelectableView = inSelectable(source);
+  const inReviewView = source === 'similar';
+  const heading = collection || (source === 'trash' ? '回收站' : source === 'similar' ? '相似项对比' : (navigation.find(item => item.id === source)?.label ?? '全部表情'));
+  const headingCount = inReviewView ? null : collection ? filtered.length : (counts[source] ?? filtered.length);
   const isFiltering = !!(query || tag || collection) || (source !== 'all' && source !== 'trash');
   const inEmptyTrash = source === 'trash' && !isFiltering;
   const inEmptyCollection = !!collection && !query && !tag;
@@ -589,7 +634,7 @@ export default function App() {
         <div className="nav-divider" role="separator" />
         <p className="nav-caption nav-caption-gap">整理</p>
         <nav>
-          <button className="nav-item" disabled={!library || !management || disabled} onClick={runScan}><ScanSearch size={16} /><span>相似项对比</span></button>
+          <button className={`nav-item ${source === 'similar' ? 'selected' : ''}`} aria-current={source === 'similar' ? 'page' : undefined} disabled={!library || !management} onClick={() => { setSource('similar'); setCollection(''); setPage(1); }}><ScanSearch size={16} /><span>相似项对比</span></button>
           <button className={`nav-item ${source === 'trash' ? 'selected' : ''}`} aria-current={source === 'trash' ? 'page' : undefined} onClick={() => { setSource('trash'); setCollection(''); setPage(1); }}><Trash2 size={16} /><span>回收站</span><span className="count">{counts.trash}</span></button>
         </nav>
         <div className="sidebar-bottom">
@@ -604,7 +649,7 @@ export default function App() {
 
       <main className="workspace" aria-busy={!!busy}>
         <header className="page-header">
-          <h1>{heading}<span className="heading-count">{headingCount}</span></h1>
+          <h1>{heading}{headingCount !== null ? <span className="heading-count">{headingCount}</span> : null}</h1>
           <div className="page-actions">
             <div className="import-split">
               <button className="button primary import-main" disabled={disabled || !library} onClick={importFiles}><ArrowDownToLine size={16} />导入表情</button>
@@ -617,7 +662,7 @@ export default function App() {
             </div>
           </div>
         </header>
-        <div className="toolbar">
+        {inReviewView ? null : <div className="toolbar">
           <label className="search-field"><Search size={18} /><input ref={searchRef} type="search" placeholder="搜索名称或标签…" aria-label="搜索名称或标签" value={query} onChange={event => { setQuery(event.target.value); setPage(1); }} disabled={!library} /></label>
           <label className="source-select compact"><span>标签</span><select aria-label="按标签筛选" value={tag} onChange={event => { setTag(event.target.value); setPage(1); }} disabled={disabled || !library}><option value="">全部标签</option>{tagFacets.map(value => <option key={value}>{value}</option>)}</select></label>
           {library ? <div className="toolbar-tail">
@@ -626,9 +671,7 @@ export default function App() {
             {inSelectableView ? <label className="versions-check" title="导出时把所选素材所在分组的全部版本一并包括"><input type="checkbox" checked={includeVersions} onChange={event => setIncludeVersions(event.target.checked)} />含全部版本</label> : null}
             {inSelectableView ? <button className="text-button slim" type="button" disabled={disabled || filtered.length === 0} onClick={exportSelection}><FolderOpen size={14} />{checkedIds.size ? `导出所选（${checkedIds.size}）` : '导出当前列表'}</button> : null}
           </div> : null}
-        </div>
-
-        {library && management ? <ManagementPanel key={library.root} management={management} busy={disabled} onImport={importSourceReport} /> : null}
+        </div>}
         {managementNotice ? <div className="notice success" role="status"><p>{managementNotice}</p><button className="icon-button" aria-label="关闭来源导入结果" onClick={() => setManagementNotice('')}><X size={17} /></button></div> : null}
         {backupNotice ? <div className="notice success" role="status"><CheckCircle2 size={18} /><div><strong>{backupNotice.text}</strong><p className="notice-path" title={backupNotice.path}>{backupNotice.path}</p></div><button className="icon-button" aria-label="关闭备份结果" onClick={() => setBackupNotice(null)}><X size={17} /></button></div> : null}
         {exportNotice ? <div className="notice success" role="status"><CheckCircle2 size={18} /><div><strong>已导出 {exportNotice.exported} 个素材{exportNotice.skipped ? `，跳过 ${exportNotice.skipped} 个` : ''}（原格式原字节）</strong><p className="notice-path" title={exportNotice.path}>{exportNotice.path}</p></div><button className="icon-button" aria-label="关闭导出结果" onClick={() => setExportNotice(null)}><X size={17} /></button></div> : null}
@@ -639,14 +682,14 @@ export default function App() {
         {previewWarning ? <div className="notice warning" role="status"><CircleAlert size={18} /><div><strong>预览提示</strong><p>{previewWarning}</p><p>请检查原文件是否仍在。</p></div><button className="icon-button" aria-label="关闭预览提示" onClick={() => setPreviewWarning('')}><X size={17} /></button></div> : null}
         {report ? <div className={`notice import-report ${report.failed.length ? 'warning' : 'success'}`} role="status"><CheckCircle2 size={18} /><div><strong>导入完成</strong><p>新增 {report.added} 个 · 重复 {report.duplicates} 个 · 失败 {report.failed.length} 个</p>{report.duplicates > 0 && trashSet.size > 0 ? <p>重复项未显示时，可能在回收站中。</p> : null}{report.failed.length ? <details><summary>查看失败文件</summary><ul>{report.failed.map((failure, index) => <li key={`${index}-${failure.name}`}><b>{failure.name}</b>：{failure.error}</li>)}</ul><p>修复后重新导入，已入库项会自动去重。</p></details> : null}</div><button className="icon-button" aria-label="关闭导入结果" onClick={() => setReport(null)}><X size={17} /></button></div> : null}
 
-        {!library ? <section className="empty-state welcome"><span className="empty-icon"><Archive size={38} strokeWidth={1.4} /></span><h2>打开你的表情库</h2><p>把散落在各处的表情收进一个安静的画册。打开本地的 StickerNest Library 文件夹开始。</p><div className="empty-actions"><button className="button primary" disabled={disabled} onClick={openLibrary}><FolderOpen size={18} />打开资料库</button><button className="button secondary" disabled={disabled} onClick={restoreFromBackup}><ArchiveRestore size={18} />从备份恢复</button></div></section> : visible.length === 0 ? <section className="empty-state"><span className="empty-icon">{inEmptyTrash ? <Trash2 size={36} strokeWidth={1.4} /> : <Images size={36} strokeWidth={1.4} />}</span><h2>{emptyTitle}</h2><p>{emptyHint}</p>{isFiltering ? <button className="button secondary" onClick={() => { setQuery(''); setTag(''); setCollection(''); setSource('all'); setPage(1); }}>查看全部表情</button> : source === 'trash' ? null : <button className="button primary" disabled={disabled} onClick={importFiles}><ArrowDownToLine size={18} />导入表情</button>}</section> : <>{showBatch && checkedIds.size ? <BatchPanel count={checkedIds.size} disabled={disabled} onRename={batchRenameSelected} onLabels={batchLabelsSelected} onTrash={trashSelected} onClose={() => setShowBatch(false)} /> : null}
+        {!library ? <section className="empty-state welcome"><span className="empty-icon"><Archive size={38} strokeWidth={1.4} /></span><h2>打开你的表情库</h2><p>把散落在各处的表情收进一个安静的画册。打开本地的 StickerNest Library 文件夹开始。</p><div className="empty-actions"><button className="button primary" disabled={disabled} onClick={openLibrary}><FolderOpen size={18} />打开资料库</button><button className="button secondary" disabled={disabled} onClick={restoreFromBackup}><ArchiveRestore size={18} />从备份恢复</button></div></section> : inReviewView ? <>
+        {management ? <ManagementPanel key={library.root} management={management} busy={disabled} onImport={importSourceReport} /> : null}
+        {management ? <SimilarReview report={scanReport} scanning={busy === '正在扫描相似项'} items={library.items} root={library.root} existingGroups={management.groups} onKeep={keepOneAsset} onIgnorePair={ignoreSimilarPair} onRescan={runScan} /> : null}
+        </> : visible.length === 0 ? <section className="empty-state"><span className="empty-icon">{inEmptyTrash ? <Trash2 size={36} strokeWidth={1.4} /> : <Images size={36} strokeWidth={1.4} />}</span><h2>{emptyTitle}</h2><p>{emptyHint}</p>{isFiltering ? <button className="button secondary" onClick={() => { setQuery(''); setTag(''); setCollection(''); setSource('all'); setPage(1); }}>查看全部表情</button> : source === 'trash' ? null : <button className="button primary" disabled={disabled} onClick={importFiles}><ArrowDownToLine size={18} />导入表情</button>}</section> : <>{showBatch && checkedIds.size ? <BatchPanel count={checkedIds.size} disabled={disabled} onRename={batchRenameSelected} onLabels={batchLabelsSelected} onTrash={trashSelected} onClose={() => setShowBatch(false)} /> : null}
         {view === 'list' ? <section className="sticker-rows" aria-label="表情列表" onMouseDown={startMarquee}><div className="sticker-row head"><span className="row-box" /><div className="row-card"><span className="row-thumb" /><span className="row-name">名称</span><span className="row-cell">格式</span><span className="row-cell">尺寸</span><span className="row-cell">大小</span><span className="row-cell">导入时间</span></div></div>{visible.map(renderListRow)}</section> : view === 'gallery' ? renderGallery() : <section className={`sticker-grid${view === 'small' ? ' compact' : ''}`} aria-label="表情列表" onMouseDown={startMarquee}>{visible.map(renderGridCell)}</section>}
         <div className="pagination"><span>第 {visiblePage} / {totalPages} 页</span><button className="icon-button" aria-label="上一页" disabled={visiblePage === 1} onClick={() => setPage(visiblePage - 1)}><ChevronLeft size={20} /></button><button className="icon-button" aria-label="下一页" disabled={visiblePage === totalPages} onClick={() => setPage(visiblePage + 1)}><ChevronRight size={20} /></button></div></>}
         {checkedIds.size > 0 && inSelectableView ? <div className="batch-dock" role="region" aria-label="批量操作">
           <span className="batch-dock-count">已选 <b>{checkedIds.size}</b> 项</span>
-          <button className="text-button" disabled={disabled} onClick={() => setShowBatch(open => !open)}>整理（重命名 / 标签 / 合集）</button>
-          <label className="versions-check" title="导出时把所选素材所在分组的全部版本一并包括"><input type="checkbox" checked={includeVersions} onChange={event => setIncludeVersions(event.target.checked)} />含全部版本</label>
-          <button className="button secondary" disabled={disabled || !library} onClick={exportSelection}><FolderOpen size={15} />导出所选</button>
           <button className="button danger" disabled={disabled || !library} onClick={() => void trashSelected()}><Trash2 size={15} />移入回收站</button>
           <button className="text-button" disabled={disabled} onClick={() => setCheckedIds(new Set())}>清除选择</button>
         </div> : null}
@@ -654,7 +697,6 @@ export default function App() {
       </main>
       {marqueeRect ? <div className="marquee-rect" style={marqueeRect} aria-hidden="true" /> : null}
       {selected && library ? <StickerDetail key={selected.id} item={selected} root={library.root} metadata={management?.metadata[selected.id]} editable={!!management && !disabled} trashed={!!management?.trash[selected.id]} trashedAt={management?.trash[selected.id]} onSave={metadata => editMetadata(selected.id, metadata)} onSetTrash={value => setItemsTrash([selected.id], value)} onClose={() => setSelected(null)} /> : null}
-      {showSimilar && scanReport && library && management ? <DuplicateReview report={scanReport} items={library.items} root={library.root} existingGroups={management.groups} onKeep={keepOneAsset} onIgnorePair={ignoreSimilarPair} onRescan={async () => setScanReport(await scanDuplicates())} onClose={() => setShowSimilar(false)} /> : null}
       {showCollect && library && management ? <CollectDialog root={library.root} accounts={management.accounts.filter(a => a.platform === '抖音')} onSnapshot={(snapshot, warning) => { setLibrary(snapshot); setPage(1); if (warning) setPreviewWarning(warning); }} onManagement={setManagement} onError={setError} onClose={() => setShowCollect(false)} /> : null}
       {showWechat && library && management ? <WeChatImportDialog root={library.root} accounts={management.accounts.filter(a => a.platform === '微信')} onSnapshot={(snapshot, warning) => { setLibrary(snapshot); setPage(1); if (warning) setPreviewWarning(warning); }} onManagement={setManagement} onError={setError} onClose={() => setShowWechat(false)} /> : null}
       {ctxMenu && library && management ? <ContextMenu x={ctxMenu.x} y={ctxMenu.y} onClose={() => setCtxMenu(null)} items={contextMenuItems()} /> : null}
