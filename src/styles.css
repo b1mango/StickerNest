@@ -46,9 +46,11 @@ svg { flex-shrink: 0; }
 h1, h2, p { margin: 0; }
 button { color: inherit; }
 .app-shell { display: grid; grid-template-columns: 220px minmax(0, 1fr); height: 100vh; }
-/* 隐藏原生标题栏后，用 data-tauri-drag-region 标记侧栏与页头为窗口拖拽区（CSS app-region 是 Electron 的，Tauri 不认） */
-.sidebar { display: flex; flex-direction: column; padding: 32px 16px 20px; border-right: 1px solid var(--rule); background: var(--paper); height: 100vh; position: sticky; top: 0; }
-.brand { display: flex; align-items: center; gap: 12px; padding: 0 12px; margin-bottom: 34px; }
+/* Native window operations are handled explicitly in App. */
+[data-window-drag-region] { user-select: none; }
+.window-handle { height: 36px; flex-shrink: 0; border-bottom: 1px solid var(--rule); margin-bottom: 20px; }
+.sidebar { display: flex; flex-direction: column; padding: 0 16px 20px; border-right: 1px solid var(--rule); background: var(--paper); height: 100vh; position: sticky; top: 0; }
+.brand { display: flex; align-items: center; gap: 12px; padding: 0 12px; margin-bottom: 28px; }
 .brand-icon { width: 44px; height: 44px; display: block; object-fit: contain; }
 .brand strong { display: block; font-size: 23px; letter-spacing: 2px; line-height: 1.25; font-weight: 650; }
 .brand div > span { font-size: 11px; color: var(--ink-secondary); letter-spacing: 1px; }

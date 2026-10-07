@@ -47,7 +47,7 @@ mkdir -p ~/StickerNest && cargo run --offline --manifest-path src-tauri/Cargo.to
 ```sh
 npm run build
 npm run test:core
-npm run tauri -- build --debug --bundles app
+npm run desktop:build -- --debug --bundles app
 ```
 
 应用没有账号、云库或遥测；资料库使用本地文件保存，同一资料库同一时间只允许一个进程打开。

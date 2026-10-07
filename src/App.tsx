@@ -168,17 +168,21 @@ export default function App() {
     return () => document.removeEventListener('mousedown', onDown, true);
   }, [showMenu]);
 
-  // 隐藏标题栏后，双击拖拽区放大/还原窗口
+  // One handler owns native dragging and double-click zoom, including brand children.
   useEffect(() => {
     if (!isDesktop) return;
-    const onDoubleClick = (event: MouseEvent) => {
-      const target = event.target as HTMLElement;
-      if (!target.closest('[data-tauri-drag-region]')) return;
-      if (target.closest('button, input, select, a, [role="checkbox"], .library-menu')) return;
-      void getCurrentWindow().toggleMaximize();
+    const onMouseDown = (event: MouseEvent) => {
+      if (event.button !== 0 || !(event.target instanceof Element)) return;
+      const target = event.target;
+      if (!target.closest('[data-window-drag-region]')) return;
+      if (target.closest('button, input, select, textarea, a, [role="checkbox"], [role="menu"], .library-menu')) return;
+      event.preventDefault();
+      const window = getCurrentWindow();
+      const operation = event.detail === 2 ? window.toggleMaximize() : window.startDragging();
+      void operation.catch(reason => setError(`窗口操作失败：${String(reason)}`));
     };
-    window.addEventListener('dblclick', onDoubleClick);
-    return () => window.removeEventListener('dblclick', onDoubleClick);
+    window.addEventListener('mousedown', onMouseDown);
+    return () => window.removeEventListener('mousedown', onMouseDown);
   }, []);
 
   // 画廊模式下让聚焦的缩略图始终滚进视野；只动缩略条自身，绝不滚动页面（否则导航按钮会跳动）
@@ -657,18 +661,19 @@ export default function App() {
   return (
     <div className={`app-shell${marqueeRect ? ' marqueeing' : ''}`}>
       {busy ? <div className="busy-overlay" aria-hidden="true" /> : null}
-      <aside className="sidebar" aria-label="资料库导航" data-tauri-drag-region>
-        <div className="brand" data-tauri-drag-region><img className="brand-icon" src="/icon.png" alt="" /><div><strong>拾趣</strong><span>StickerNest</span></div></div>
-        <p className="nav-caption" data-tauri-drag-region>我的资料库</p>
+      <aside className="sidebar" aria-label="资料库导航" data-window-drag-region>
+        <div className="window-handle" data-window-drag-region aria-hidden="true" />
+        <div className="brand" data-window-drag-region><img className="brand-icon" src="/icon.png" alt="" draggable={false} /><div><strong>拾趣</strong><span>StickerNest</span></div></div>
+        <p className="nav-caption" data-window-drag-region>我的资料库</p>
         <nav>{navigation.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${source === id && !collection ? 'selected' : ''}`} aria-current={source === id && !collection ? 'page' : undefined} onClick={() => { setSource(id); setCollection(''); setPage(1); }}><Icon size={17} /><span>{label}</span><span className="count">{counts[id]}</span></button>)}</nav>
         <div className="nav-divider" role="separator" />
-        <p className="nav-caption nav-caption-gap" data-tauri-drag-region>合集</p>
+        <p className="nav-caption nav-caption-gap" data-window-drag-region>合集</p>
         <nav aria-label="我的合集">
           {collectionEntries.map(([name, count]) => <button key={name} className={`nav-item ${collection === name ? 'selected' : ''}`} aria-current={collection === name ? 'page' : undefined} onClick={() => { setCollection(current => current === name ? '' : name); setSource('all'); setPage(1); }}><FolderOpen size={15} /><span>{name}</span><span className="count">{count}</span></button>)}
           <button className="nav-item new-collection" disabled={!library || disabled} onClick={() => setShowNewCollection(true)}><FolderPlus size={15} /><span>新建合集</span></button>
         </nav>
         <div className="nav-divider" role="separator" />
-        <p className="nav-caption nav-caption-gap" data-tauri-drag-region>整理</p>
+        <p className="nav-caption nav-caption-gap" data-window-drag-region>整理</p>
         <nav>
           <button className={`nav-item ${source === 'similar' ? 'selected' : ''}`} aria-current={source === 'similar' ? 'page' : undefined} disabled={!library || !management} onClick={() => { setSource('similar'); setCollection(''); setPage(1); }}><ScanSearch size={16} /><span>相似项对比</span></button>
           <button className={`nav-item ${source === 'trash' ? 'selected' : ''}`} aria-current={source === 'trash' ? 'page' : undefined} onClick={() => { setSource('trash'); setCollection(''); setPage(1); }}><Trash2 size={16} /><span>回收站</span><span className="count">{counts.trash}</span></button>
@@ -684,9 +689,9 @@ export default function App() {
       </aside>
 
       <main className="workspace" aria-busy={!!busy}>
-        <div className="page-top" data-tauri-drag-region>
-        <header className="page-header" data-tauri-drag-region>
-          <h1 data-tauri-drag-region>{heading}{headingCount !== null ? <span className="heading-count">{headingCount}</span> : null}</h1>
+        <div className="page-top" data-window-drag-region>
+        <header className="page-header" data-window-drag-region>
+          <h1 data-window-drag-region>{heading}{headingCount !== null ? <span className="heading-count">{headingCount}</span> : null}</h1>
           <div className="page-actions">
             <div className="import-split">
               <button className="button primary import-main" disabled={disabled || !library} onClick={importFiles}><ArrowDownToLine size={16} />导入表情</button>
@@ -699,7 +704,7 @@ export default function App() {
             </div>
           </div>
         </header>
-        {inReviewView ? null : <div className="toolbar" data-tauri-drag-region>
+        {inReviewView ? null : <div className="toolbar" data-window-drag-region>
           <label className="search-field"><Search size={18} /><input ref={searchRef} type="search" placeholder="搜索名称或标签…" aria-label="搜索名称或标签" value={query} onChange={event => { setQuery(event.target.value); setPage(1); }} disabled={!library} /></label>
           <label className="source-select compact"><span>标签</span><select aria-label="按标签筛选" value={tag} onChange={event => { setTag(event.target.value); setPage(1); }} disabled={disabled || !library}><option value="">全部标签</option>{tagFacets.map(value => <option key={value}>{value}</option>)}</select></label>
           {library ? <div className="toolbar-tail">

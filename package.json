@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "tauri": "tauri",
     "desktop": "tauri dev",
-    "test:core": "cargo test --manifest-path src-tauri/Cargo.toml"
+    "test:core": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "desktop:build": "node scripts/build-desktop.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

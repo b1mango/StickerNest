@@ -47,7 +47,7 @@ Then choose “打开资料库” in the app and open the generated `StickerNest
 ```sh
 npm run build
 npm run test:core
-npm run tauri -- build --debug --bundles app
+npm run desktop:build -- --debug --bundles app
 ```
 
 There are no accounts, cloud library, or telemetry. Libraries are stored as local files, and one library can only be opened by one process at a time.
