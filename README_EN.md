@@ -1,64 +1,56 @@
-<div align="center">
+# StickerNest
 
-<img src="docs/assets/icon.png" width="128" alt="StickerNest icon" />
+<p align="center">
+  <img src="docs/assets/icon.png" alt="StickerNest" width="112" height="112" />
+</p>
 
-# StickerNest · 拾趣
+<p align="center">A local-first macOS sticker library for collecting, organizing, deduplicating, and exporting on your own machine.</p>
 
-A local-first sticker library for your Mac: collect, organize, dedupe and export — all on your own machine.
+<p align="center">
+  <img src="https://img.shields.io/badge/status-unreleased-e3aa43" alt="status unreleased" />
+  <img src="https://img.shields.io/badge/platform-macOS-1f6feb" alt="macOS" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-f5c542" alt="MIT" /></a>
+</p>
 
-[简体中文](README.md) · **English**
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tauri](https://img.shields.io/badge/Tauri-2-24C8D8.svg)](https://tauri.app)
-[![React](https://img.shields.io/badge/React-19-61DAFB.svg)](https://react.dev)
-[![Platform](https://img.shields.io/badge/Platform-macOS-lightgrey.svg)](https://www.apple.com/macos)
-
-</div>
+<p align="center"><a href="README.md">简体中文</a> · English</p>
 
 ## Features
 
-- **Four views**: large icons / small icons / list / gallery, with a sticky page header while scrolling
-- **Finder-style selection**: click to select, Shift-click ranges, rubber-band marquee, ⌘A, Esc
-- **Collections**: create empty collections any time; copy / move stickers via the right-click menu
-- **Tags & search**: batch rename, batch tags, full-text search over names and tags
-- **Similar-items review**: scan for exact, similar and animation duplicates; keep one or ignore per group
-- **Version groups & trash**: collapse multi-version stickers; deleted items stay recoverable
-- **Export & backup**: export selected stickers byte-for-byte; full-library backups with SHA-256 verification
+- Four views: large icons, small icons, list, and gallery.
+- Click, Shift-click ranges, drag-to-select, ⌘A to select all, and Esc to cancel.
+- Create collections and copy or move stickers from the context menu.
+- Batch rename, batch tagging, and search across names and tags.
+- Review exact, likely-similar, and animation duplicates in groups.
+- Version groups and a recoverable trash.
+- Byte-for-byte export in the original format and full-library backups with SHA-256 verification.
 
-## Getting started
+## Installation
 
-Requires Node.js, Rust and macOS Command Line Tools.
+No GitHub Release is published yet; run from source. You need Node.js, Rust, and the macOS Command Line Tools.
 
 ```sh
 npm ci
-npm run desktop   # launch the desktop app in dev mode
+npm run desktop
 ```
 
-Create a library once (pick any parent folder):
+Create a library once (choose any parent directory):
 
 ```sh
 mkdir -p ~/StickerNest && cargo run --offline --manifest-path src-tauri/Cargo.toml \
   --bin import-local -- --input /tmp --library ~/StickerNest --create --source 本地
 ```
 
-Then open the generated `StickerNest Library` folder via “打开资料库” in the app.
+Then choose “打开资料库” in the app and open the generated `StickerNest Library` folder.
 
-Native build:
+## Development
 
 ```sh
+npm run build
+npm run test:core
 npm run tauri -- build --debug --bundles app
-# output: src-tauri/target/debug/bundle/macos/StickerNest.app
 ```
 
-## How it's built
-
-| Layer | Tech |
-| --- | --- |
-| UI | React 19 + TypeScript + Vite, Finder-like interactions |
-| Shell | Tauri 2 (WKWebView + native dialogs) |
-| Core | Rust: plain-file library (`assets/` + `library.json` + `management.json`), perceptual-hash similarity, backup/restore, WeChat & Douyin import |
-
-No accounts, no cloud, no telemetry; one library can only be opened by one process at a time.
+There are no accounts, cloud library, or telemetry. Libraries are stored as local files, and one library can only be opened by one process at a time.
 
 ## License
 
