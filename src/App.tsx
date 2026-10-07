@@ -11,7 +11,7 @@ import { CollectDialog } from './components/CollectDialog';
 import { WeChatImportDialog } from './components/WeChatImportDialog';
 import './styles.css';
 
-const PAGE_SIZES = [30, 60, 120];
+const PAGE_SIZES = [50, 100, 200];
 const PAGE_SIZE_KEY = 'stickernest.pageSize';
 const VIEW_KEY = 'stickernest.view';
 type ViewMode = 'large' | 'small' | 'list' | 'gallery';
@@ -80,7 +80,7 @@ export default function App() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(() => {
     const saved = Number(localStorage.getItem(PAGE_SIZE_KEY));
-    return PAGE_SIZES.includes(saved) ? saved : 60;
+    return PAGE_SIZES.includes(saved) ? saved : 50;
   });
   const [view, setView] = useState<ViewMode>(() => {
     const saved = localStorage.getItem(VIEW_KEY);
@@ -522,6 +522,7 @@ export default function App() {
 
   function openCardMenu(event: React.MouseEvent, item: Sticker | null) {
     event.preventDefault();
+    if (!item && checkedIds.size === 0) return;
     setCtxMenu({ x: event.clientX, y: event.clientY, item });
     if (item && !checkedIds.has(item.id)) setCheckedIds(current => new Set([...current, item.id]));
   }
@@ -533,19 +534,27 @@ export default function App() {
     const multi = checkedIds.size > 1;
     const collectionNames = collectionEntries.map(([name]) => name);
     const items: ContextMenuItem[] = [];
-    if (target) {
-      const openDetail = (edit: boolean) => { setSelected(library!.items.find(original => original.id === targetId) ?? target); setSelectedEdit(edit); };
-      items.push(
-        { key: 'detail', label: '查看详情', onSelect: () => openDetail(false) },
-        { key: 'rename-one', label: '重命名…', onSelect: () => openDetail(true) },
-        { key: 'tags-one', label: '设置标签…', onSelect: () => openDetail(true) },
-        { key: 'sep1', label: '' },
-      );
-    }
+    if (target) items.push({ key: 'detail', label: '查看详情', onSelect: () => { setSelected(library!.items.find(original => original.id === targetId) ?? target); setSelectedEdit(false); } });
     if (inSelectableView && ids.length) {
+      const openEdit = () => { setSelected(library!.items.find(original => original.id === targetId) ?? target!); setSelectedEdit(true); };
       const copyChildren: ContextMenuItem[] = collectionNames.map(name => ({ key: `copy:${name}`, label: `复制到「${name}」`, onSelect: () => labelCollection(ids, name, '') }));
       copyChildren.push({ key: 'sepcopy', label: '' }, { key: 'copy-new', label: '新建合集并加入…', onSelect: () => setShowNewCollection(true) });
-      items.push({ key: 'copy-col', label: multi ? '批量加入合集' : collection ? '复制到合集' : '加入合集', children: copyChildren });
+      items.push({ key: 'sep1', label: '' });
+      if (multi) {
+        // 多选：批量三件套放在同一段
+        items.push(
+          { key: 'rename', label: `批量重命名（${checkedIds.size} 项）`, onSelect: () => setShowBatch(true) },
+          { key: 'tags', label: `批量设置标签（${checkedIds.size} 项）`, onSelect: () => setShowBatch(true) },
+          { key: 'copy-col', label: '批量加入合集', children: copyChildren },
+        );
+      } else if (target) {
+        // 单选：重命名、标签、合集、导出放在同一段
+        items.push(
+          { key: 'rename-one', label: '重命名…', onSelect: openEdit },
+          { key: 'tags-one', label: '设置标签…', onSelect: openEdit },
+          { key: 'copy-col', label: collection ? '复制到合集' : '加入合集', children: copyChildren },
+        );
+      }
       if (collection) {
         const moveChildren: ContextMenuItem[] = collectionNames.filter(name => name !== collection).map(name => ({ key: `move:${name}`, label: `移动到「${name}」`, onSelect: () => labelCollection(ids, name, collection) }));
         moveChildren.push({ key: 'sepmove', label: '' }, { key: 'move-new', label: '新建合集并移入…', onSelect: () => setShowNewCollection(true) });
@@ -553,14 +562,8 @@ export default function App() {
         items.push({ key: 'leave-col', label: `从「${collection}」移出（${ids.length} 项）`, onSelect: () => leaveCollection(ids, collection) });
       }
       items.push({ key: 'sep-col', label: '' });
-    }
-    if (multi) {
-      items.push(
-        { key: 'rename', label: `批量重命名（${checkedIds.size} 项）`, onSelect: () => setShowBatch(true) },
-        { key: 'tags', label: `批量设置标签（${checkedIds.size} 项）`, onSelect: () => setShowBatch(true) },
-        { key: 'sep2', label: '' },
-        { key: 'export', label: `导出所选（${checkedIds.size} 项）`, onSelect: exportSelection },
-      );
+      items.push({ key: 'export', label: multi ? `导出所选（${checkedIds.size} 项）` : '导出', onSelect: exportSelection });
+      items.push({ key: 'sep2', label: '' });
     }
     if (multi || target) items.push({ key: 'trash', label: multi ? `移入回收站（${checkedIds.size} 项）` : '移入回收站', danger: true, onSelect: () => { const trashIds = multi ? ids : [targetId]; void setTrash(library!.root, trashIds, true).then(setManagement).catch(reason => setError(String(reason))); setCheckedIds(new Set()); } });
     return items;
@@ -568,10 +571,8 @@ export default function App() {
 
   function renderBadges(item: Sticker) {
     const group = groupByMain.get(item.id);
-    return <>
-      <span className="format-badge">{item.format.toUpperCase()}</span>
-      {group ? <span className="group-badge" title={`版本分组 ${group.memberIds.length} 项`}><Images size={11} />{group.memberIds.length}</span> : null}
-    </>;
+    if (!group) return null;
+    return <span className="group-badge" title={`版本分组 ${group.memberIds.length} 项`}><Images size={11} />{group.memberIds.length}</span>;
   }
 
   function renderGridCell(item: Sticker) {

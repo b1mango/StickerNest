@@ -137,7 +137,6 @@ h1 { display: flex; align-items: center; gap: 14px; font-size: 26px; font-weight
 .sticker-image { position: relative; aspect-ratio: 1; padding: 16px; display: flex; align-items: center; justify-content: center; background: var(--paper-raised); border: 1px solid var(--rule); border-radius: var(--radius-card); overflow: hidden; transition: border-color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-med) var(--ease-out); }
 .sticker-card:hover .sticker-image { border-color: var(--rule-strong); }
 .sticker-image img { display: block; width: 100%; height: 100%; object-fit: contain; }
-.format-badge { position: absolute; bottom: 8px; right: 8px; padding: 2px 5px; border-radius: 4px; font-size: 9px; font-weight: 600; background: color-mix(in srgb, var(--paper) 88%, transparent); border: 1px solid var(--rule); color: var(--ink-muted); }
 .sticker-info { padding: 12px 2px 0; }
 .sticker-info strong { display: block; font-weight: 550; font-size: 12px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .sticker-info > span { display: flex; justify-content: space-between; gap: 8px; font-size: 10px; color: var(--ink-muted); margin-top: 6px; line-height: 1.5; }
@@ -227,7 +226,6 @@ h1 { display: flex; align-items: center; gap: 14px; font-size: 26px; font-weight
 .sticker-card.checked .sticker-image img { opacity: .9; }
 .sticker-card.checked .sticker-info strong { color: var(--forest); }
 .group-badge { position: absolute; top: 8px; right: 8px; display: inline-flex; gap: 2px; align-items: center; background: color-mix(in srgb, var(--ink) 72%, transparent); color: var(--paper-raised); font-size: 9px; font-weight: 550; padding: 1px 5px; border-radius: 999px; font-variant-numeric: tabular-nums; }
-.format-badge { top: auto; bottom: 8px; }
 .group-tray { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; padding: 2px 4px 10px; }
 .group-expand-btn, .group-disband-btn { background: none; border: 0; color: var(--forest); font-size: 11px; min-height: 32px; cursor: pointer; padding: 0; }
 .group-meta-inline { font-size: 10px; color: var(--ink-muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
