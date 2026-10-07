@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, ArchiveRestore, ArrowDownToLine, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Folder, FolderOpen, FolderPlus, GalleryHorizontal, Grid3X3, HardDriveDownload, Images, LayoutGrid, List, LoaderCircle, MessageCircle, Music2, ScanSearch, Search, Smile, Trash2, X } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowDownToLine, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Folder, FolderOpen, FolderPlus, GalleryHorizontal, Grid3X3, HardDriveDownload, Images, LayoutGrid, List, LoaderCircle, MessageCircle, Music2, ScanSearch, Search, Trash2, X } from 'lucide-react';
 import { chooseLibrary, currentLibrary, imageUrl, importImages, isDesktop, getManagement, saveMetadata, setTrash, backupLibrary, restoreBackup, openLibraryPath, scanDuplicates, disbandGroup, ignorePair, exportAssets, saveGroupMetadata, batchRename, batchLabels, addCollection } from './api';
 import { SOURCE_LABELS, formatBytes, type ExportSummary, type ImportReport, type ScanReport, type Snapshot, type Sticker, type ManagementSnapshot, type AssetMetadata } from './types';
 import { StickerDetail } from './components/StickerDetail';
@@ -11,7 +11,8 @@ import { CollectDialog } from './components/CollectDialog';
 import { WeChatImportDialog } from './components/WeChatImportDialog';
 import './styles.css';
 
-const PAGE_SIZE = 60;
+const PAGE_SIZES = [30, 60, 120];
+const PAGE_SIZE_KEY = 'stickernest.pageSize';
 const VIEW_KEY = 'stickernest.view';
 type ViewMode = 'large' | 'small' | 'list' | 'gallery';
 const VIEW_MODES: { id: ViewMode; label: string; icon: typeof LayoutGrid }[] = [
@@ -77,6 +78,10 @@ export default function App() {
 
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(() => {
+    const saved = Number(localStorage.getItem(PAGE_SIZE_KEY));
+    return PAGE_SIZES.includes(saved) ? saved : 60;
+  });
   const [view, setView] = useState<ViewMode>(() => {
     const saved = localStorage.getItem(VIEW_KEY);
     return VIEW_MODES.some(mode => mode.id === saved) ? (saved as ViewMode) : 'large';
@@ -89,6 +94,7 @@ export default function App() {
   const [exportNotice, setExportNotice] = useState<ExportSummary | null>(null);
   const [scanReport, setScanReport] = useState<ScanReport | null>(null);
   const [selected, setSelected] = useState<Sticker | null>(null);
+  const [selectedEdit, setSelectedEdit] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [showBatch, setShowBatch] = useState(false);
@@ -107,6 +113,11 @@ export default function App() {
   showMenuRef.current = showMenu;
   const ctxMenuRef = useRef(ctxMenu);
   ctxMenuRef.current = ctxMenu;
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const focusIdRef = useRef(focusId);
+  focusIdRef.current = focusId;
+  const visibleRef = useRef<Sticker[]>([]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -115,6 +126,19 @@ export default function App() {
         if (showMenuRef.current) { setShowMenu(false); return; }
         if (ctxMenuRef.current) return; // 右键菜单自己的 Esc 处理（也会 preventDefault）
         setCheckedIds(current => current.size ? new Set() : current);
+        return;
+      }
+      // 画廊模式：方向键移动聚焦的表情，缩略条随之滚动
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        if (viewRef.current !== 'gallery' || document.querySelector('dialog[open]')) return;
+        const target = event.target as HTMLElement | null;
+        if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return;
+        event.preventDefault();
+        const list = visibleRef.current;
+        if (!list.length) return;
+        const index = Math.max(0, list.findIndex(item => item.id === focusIdRef.current));
+        const next = list[Math.min(list.length - 1, Math.max(0, index + (event.key === 'ArrowRight' ? 1 : -1)))];
+        setFocusId(next.id);
         return;
       }
       const mod = event.metaKey || event.ctrlKey;
@@ -143,13 +167,20 @@ export default function App() {
     return () => document.removeEventListener('mousedown', onDown, true);
   }, [showMenu]);
 
-  // 画廊模式下让聚焦的缩略图始终滚进视野
+  // 画廊模式下让聚焦的缩略图始终滚进视野；只动缩略条自身，绝不滚动页面（否则导航按钮会跳动）
+  const stripRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (view !== 'gallery' || !focusId) return;
-    document.querySelector('.gallery-thumb-btn.focused')?.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+    const strip = stripRef.current;
+    const thumb = strip?.querySelector('.gallery-thumb-btn.focused') as HTMLElement | null;
+    if (!strip || !thumb) return;
+    const stripBox = strip.getBoundingClientRect();
+    const thumbBox = thumb.getBoundingClientRect();
+    strip.scrollTo({ left: strip.scrollLeft + (thumbBox.left - stripBox.left) - (strip.clientWidth - thumbBox.width) / 2, behavior: 'smooth' });
   }, [focusId, view]);
 
   useEffect(() => { localStorage.setItem(VIEW_KEY, view); }, [view]);
+  useEffect(() => { localStorage.setItem(PAGE_SIZE_KEY, String(pageSize)); }, [pageSize]);
 
   useEffect(() => {
     if (!isDesktop) return;
@@ -409,9 +440,10 @@ export default function App() {
     setManagement(await saveMetadata(library.root, assetId, metadata));
   }
   filteredRef.current = filtered;
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const visiblePage = Math.min(page, totalPages);
-  const visible = filtered.slice((visiblePage - 1) * PAGE_SIZE, visiblePage * PAGE_SIZE);
+  const visible = filtered.slice((visiblePage - 1) * pageSize, visiblePage * pageSize);
+  visibleRef.current = visible;
   const disabled = !!busy || !isDesktop;
   const inSelectableView = inSelectable(source);
   const inReviewView = source === 'similar';
@@ -501,7 +533,15 @@ export default function App() {
     const multi = checkedIds.size > 1;
     const collectionNames = collectionEntries.map(([name]) => name);
     const items: ContextMenuItem[] = [];
-    if (target) items.push({ key: 'detail', label: '查看详情', onSelect: () => setSelected(library!.items.find(original => original.id === targetId) ?? target) }, { key: 'sep1', label: '' });
+    if (target) {
+      const openDetail = (edit: boolean) => { setSelected(library!.items.find(original => original.id === targetId) ?? target); setSelectedEdit(edit); };
+      items.push(
+        { key: 'detail', label: '查看详情', onSelect: () => openDetail(false) },
+        { key: 'rename-one', label: '重命名…', onSelect: () => openDetail(true) },
+        { key: 'tags-one', label: '设置标签…', onSelect: () => openDetail(true) },
+        { key: 'sep1', label: '' },
+      );
+    }
     if (inSelectableView && ids.length) {
       const copyChildren: ContextMenuItem[] = collectionNames.map(name => ({ key: `copy:${name}`, label: `复制到「${name}」`, onSelect: () => labelCollection(ids, name, '') }));
       copyChildren.push({ key: 'sepcopy', label: '' }, { key: 'copy-new', label: '新建合集并加入…', onSelect: () => setShowNewCollection(true) });
@@ -569,13 +609,13 @@ export default function App() {
 
   function renderGallery() {
     return <section className="gallery-view" aria-label="表情列表" onMouseDown={startMarquee}>
-      {focusItem ? <div className="gallery-stage" tabIndex={0} onKeyDown={event => { if (event.key === 'ArrowLeft') { event.preventDefault(); moveFocus(-1); } if (event.key === 'ArrowRight') { event.preventDefault(); moveFocus(1); } }}>
+      {focusItem ? <div className="gallery-stage" tabIndex={0}>
         <button className="icon-button gallery-nav prev" aria-label="上一个" disabled={focusIndex <= 0} onClick={() => moveFocus(-1)}><ChevronLeft size={22} /></button>
         <StickerPreview src={imageUrl(library!.root, focusItem.fileName)} name={focusItem.name} eager />
         <button className="icon-button gallery-nav next" aria-label="下一个" disabled={focusIndex >= visible.length - 1} onClick={() => moveFocus(1)}><ChevronRight size={22} /></button>
         <div className="gallery-caption"><strong title={focusItem.name}>{focusItem.name}</strong><span>{focusItem.format.toUpperCase()} · {focusItem.width}×{focusItem.height} · {formatBytes(focusItem.bytes)} · 第 {focusIndex + 1} / {visible.length} 项</span></div>
       </div> : null}
-      <div className="gallery-strip" role="listbox" aria-label="缩略图">
+      <div className="gallery-strip" role="listbox" aria-label="缩略图" ref={stripRef}>
         {visible.map(item => {
           const isChecked = checkedIds.has(item.id);
           return <div className="gallery-thumb" key={item.id} data-marquee-id={item.id}>
@@ -593,7 +633,7 @@ export default function App() {
     <div className={`app-shell${marqueeRect ? ' marqueeing' : ''}`}>
       {busy ? <div className="busy-overlay" aria-hidden="true" /> : null}
       <aside className="sidebar" aria-label="资料库导航">
-        <div className="brand"><span className="brand-mark"><Smile size={25} strokeWidth={1.7} /></span><div><strong>拾趣</strong><span>StickerNest</span></div></div>
+        <div className="brand"><img className="brand-icon" src="/icon.png" alt="" /><div><strong>拾趣</strong><span>StickerNest</span></div></div>
         <p className="nav-caption">我的资料库</p>
         <nav>{navigation.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${source === id && !collection ? 'selected' : ''}`} aria-current={source === id && !collection ? 'page' : undefined} onClick={() => { setSource(id); setCollection(''); setPage(1); }}><Icon size={17} /><span>{label}</span><span className="count">{counts[id]}</span></button>)}</nav>
         <div className="nav-divider" role="separator" />
@@ -656,7 +696,7 @@ export default function App() {
         {management ? <SimilarReview report={scanReport} scanning={busy === '正在扫描相似项'} items={library.items} root={library.root} existingGroups={management.groups} onKeep={keepOneAsset} onIgnorePair={ignoreSimilarPair} onRescan={runScan} /> : null}
         </> : visible.length === 0 ? <section className="empty-state"><span className="empty-icon">{inEmptyTrash ? <Trash2 size={36} strokeWidth={1.4} /> : <Images size={36} strokeWidth={1.4} />}</span><h2>{emptyTitle}</h2><p>{emptyHint}</p>{isFiltering ? <button className="button secondary" onClick={() => { setQuery(''); setTag(''); setCollection(''); setSource('all'); setPage(1); }}>查看全部表情</button> : source === 'trash' ? null : <button className="button primary" disabled={disabled} onClick={importFiles}><ArrowDownToLine size={18} />导入表情</button>}</section> : <>{showBatch && checkedIds.size ? <BatchPanel count={checkedIds.size} disabled={disabled} onRename={batchRenameSelected} onLabels={batchLabelsSelected} onTrash={trashSelected} onClose={() => setShowBatch(false)} /> : null}
         {view === 'list' ? <section className="sticker-rows" aria-label="表情列表" onMouseDown={startMarquee}><div className="sticker-row head"><span className="row-box" /><div className="row-card"><span className="row-thumb" /><span className="row-name">名称</span><span className="row-cell">格式</span><span className="row-cell">尺寸</span><span className="row-cell">大小</span><span className="row-cell">导入时间</span></div></div>{visible.map(renderListRow)}</section> : view === 'gallery' ? renderGallery() : <section className={`sticker-grid${view === 'small' ? ' compact' : ''}`} aria-label="表情列表" onMouseDown={startMarquee}>{visible.map(renderGridCell)}</section>}
-        <div className="pagination"><span>第 {visiblePage} / {totalPages} 页</span><button className="icon-button" aria-label="上一页" disabled={visiblePage === 1} onClick={() => setPage(visiblePage - 1)}><ChevronLeft size={20} /></button><button className="icon-button" aria-label="下一页" disabled={visiblePage === totalPages} onClick={() => setPage(visiblePage + 1)}><ChevronRight size={20} /></button></div></>}
+        <div className="pagination"><label className="page-size">每页<select aria-label="每页显示数量" value={pageSize} onChange={event => { setPageSize(Number(event.target.value)); setPage(1); }}>{PAGE_SIZES.map(size => <option key={size} value={size}>{size}</option>)}</select></label><span>第 {visiblePage} / {totalPages} 页</span><button className="icon-button" aria-label="上一页" disabled={visiblePage === 1} onClick={() => setPage(visiblePage - 1)}><ChevronLeft size={20} /></button><button className="icon-button" aria-label="下一页" disabled={visiblePage === totalPages} onClick={() => setPage(visiblePage + 1)}><ChevronRight size={20} /></button></div></>}
         {checkedIds.size > 0 && inSelectableView ? <div className="batch-dock" role="region" aria-label="批量操作">
           <span className="batch-dock-count">已选 <b>{checkedIds.size}</b> 项</span>
           <button className="button danger" disabled={disabled || !library} onClick={() => void trashSelected()}><Trash2 size={15} />移入回收站</button>
@@ -665,7 +705,7 @@ export default function App() {
         <footer className="library-footer"><Folder size={14} /><span title={library?.root}>{library?.root ?? '尚未选择资料库'}</span><span className="footer-count">{library ? `${library.items.length} 个原始素材` : '本地资料库'}</span></footer>
       </main>
       {marqueeRect ? <div className="marquee-rect" style={marqueeRect} aria-hidden="true" /> : null}
-      {selected && library ? <StickerDetail key={selected.id} item={selected} root={library.root} metadata={management?.metadata[selected.id]} editable={!!management && !disabled} trashed={!!management?.trash[selected.id]} trashedAt={management?.trash[selected.id]} onSave={metadata => editMetadata(selected.id, metadata)} onSetTrash={value => setItemsTrash([selected.id], value)} onClose={() => setSelected(null)} /> : null}
+      {selected && library ? <StickerDetail key={selected.id} item={selected} root={library.root} metadata={management?.metadata[selected.id]} editable={!!management && !disabled} trashed={!!management?.trash[selected.id]} trashedAt={management?.trash[selected.id]} edit={selectedEdit} onSave={metadata => editMetadata(selected.id, metadata)} onSetTrash={value => setItemsTrash([selected.id], value)} onClose={() => { setSelected(null); setSelectedEdit(false); }} /> : null}
       {showCollect && library && management ? <CollectDialog root={library.root} accounts={management.accounts.filter(a => a.platform === '抖音')} onSnapshot={(snapshot, warning) => { setLibrary(snapshot); setPage(1); if (warning) setPreviewWarning(warning); }} onManagement={setManagement} onError={setError} onClose={() => setShowCollect(false)} /> : null}
       {showWechat && library && management ? <WeChatImportDialog root={library.root} accounts={management.accounts.filter(a => a.platform === '微信')} onSnapshot={(snapshot, warning) => { setLibrary(snapshot); setPage(1); if (warning) setPreviewWarning(warning); }} onManagement={setManagement} onError={setError} onClose={() => setShowWechat(false)} /> : null}
       {ctxMenu && library && management ? <ContextMenu x={ctxMenu.x} y={ctxMenu.y} onClose={() => setCtxMenu(null)} items={contextMenuItems()} /> : null}

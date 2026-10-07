@@ -60,11 +60,6 @@ npm run tauri -- build --debug --bundles app
 
 无账号、无云库、无遥测；同一资料库同一时间仅允许一个进程打开。
 
-## 规划（待实现）
-
-- AI 批量重命名：按画面内容自动起名
-- AI 识别分类：自动打标签、归到合集
-
 ## 许可
 
 [MIT](LICENSE) © b1mango

@@ -4,13 +4,13 @@ import { imageUrl } from '../api';
 import { formatBytes, SOURCE_LABELS, type Sticker, type AssetMetadata } from '../types';
 import { StickerPreview } from './StickerPreview';
 
-export function StickerDetail({ item, root, metadata, editable, trashed, trashedAt, onSave, onSetTrash, onClose }: {
+export function StickerDetail({ item, root, metadata, editable, trashed, trashedAt, edit = false, onSave, onSetTrash, onClose }: {
   item: Sticker; root: string; metadata?: AssetMetadata; editable: boolean;
-  trashed: boolean; trashedAt?: number;
+  trashed: boolean; trashedAt?: number; edit?: boolean;
   onSave: (metadata: AssetMetadata) => Promise<void>;
   onSetTrash: (trashed: boolean) => Promise<void>; onClose: () => void;
 }) {
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(edit);
   const [name, setName] = useState(metadata?.name || item.name);
   const [tags, setTags] = useState(metadata?.tags.join('，') ?? '');
   const [collections, setCollections] = useState(metadata?.collections.join('，') ?? '');

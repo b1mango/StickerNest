@@ -60,11 +60,6 @@ npm run tauri -- build --debug --bundles app
 
 No accounts, no cloud, no telemetry; one library can only be opened by one process at a time.
 
-## Roadmap
-
-- AI batch rename (naming stickers from image content)
-- AI auto-categorization (tags and collections)
-
 ## License
 
 [MIT](LICENSE) © b1mango
