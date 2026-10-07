@@ -1,10 +1,9 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Archive, ArchiveRestore, ArrowDownToLine, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Folder, FolderOpen, FolderPlus, GalleryHorizontal, Grid3X3, HardDriveDownload, Images, LayoutGrid, List, LoaderCircle, MessageCircle, Music2, ScanSearch, Search, Smile, Trash2, X } from 'lucide-react';
-import { chooseLibrary, currentLibrary, imageUrl, importImages, isDesktop, getManagement, saveMetadata, importProvenance, setTrash, backupLibrary, restoreBackup, openLibraryPath, scanDuplicates, disbandGroup, ignorePair, exportAssets, saveGroupMetadata, batchRename, batchLabels, createGroup, addCollection } from './api';
+import { chooseLibrary, currentLibrary, imageUrl, importImages, isDesktop, getManagement, saveMetadata, setTrash, backupLibrary, restoreBackup, openLibraryPath, scanDuplicates, disbandGroup, ignorePair, exportAssets, saveGroupMetadata, batchRename, batchLabels, addCollection } from './api';
 import { SOURCE_LABELS, formatBytes, type ExportSummary, type ImportReport, type ScanReport, type Snapshot, type Sticker, type ManagementSnapshot, type AssetMetadata } from './types';
 import { StickerDetail } from './components/StickerDetail';
 import { StickerPreview } from './components/StickerPreview';
-import { ManagementPanel } from './components/ManagementPanel';
 import { SimilarReview } from './components/SimilarReview';
 import { BatchPanel } from './components/BatchPanel';
 import { ContextMenu, type ContextMenuItem } from './components/ContextMenu';
@@ -72,7 +71,6 @@ export default function App() {
   const [library, setLibrary] = useState<Snapshot | null>(null);
   const [management, setManagement] = useState<ManagementSnapshot | null>(null);
   const [managementError, setManagementError] = useState('');
-  const [managementNotice, setManagementNotice] = useState('');
   const [tag, setTag] = useState('');
   const [collection, setCollection] = useState('');
   const [source, setSource] = useState('all');
@@ -96,7 +94,6 @@ export default function App() {
   const [showBatch, setShowBatch] = useState(false);
   const [showNewCollection, setShowNewCollection] = useState(false);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; item: Sticker | null } | null>(null);
-  const [includeVersions, setIncludeVersions] = useState(false);
   const [showCollect, setShowCollect] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showWechat, setShowWechat] = useState(false);
@@ -106,7 +103,6 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement>(null);
   const anchorId = useRef('');
   const marqueeState = useRef<{ x0: number; y0: number; base: Set<string>; active: boolean } | null>(null);
-  const autoScanRoot = useRef('');
   const showMenuRef = useRef(showMenu);
   showMenuRef.current = showMenu;
   const ctxMenuRef = useRef(ctxMenu);
@@ -147,16 +143,11 @@ export default function App() {
     return () => document.removeEventListener('mousedown', onDown, true);
   }, [showMenu]);
 
-  // 进入相似项对比页时自动扫描一次；之后保留/忽略只就地剔除，手动「重新扫描」才全量重扫
+  // 画廊模式下让聚焦的缩略图始终滚进视野
   useEffect(() => {
-    if (source !== 'similar' || !library || !management || busy || !isDesktop) return;
-    if (autoScanRoot.current === library.root) return;
-    autoScanRoot.current = library.root;
-    void run('正在扫描相似项', async () => {
-      setScanReport(await scanDuplicates());
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [source, library, management, busy]);
+    if (view !== 'gallery' || !focusId) return;
+    document.querySelector('.gallery-thumb-btn.focused')?.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+  }, [focusId, view]);
 
   useEffect(() => { localStorage.setItem(VIEW_KEY, view); }, [view]);
 
@@ -188,9 +179,8 @@ export default function App() {
   }
 
   async function applyLibrary(snapshot: Snapshot) {
-    setLibrary(snapshot); setManagementNotice(''); setManagement(null); setManagementError(''); setTag(''); setCollection(''); setReport(null); setSelected(null); setQuery(''); setSource('all'); setPage(1); setBackupNotice(null); setExportNotice(null); setScanReport(null); setCheckedIds(new Set()); setExpandedGroups(new Set()); setShowBatch(false); setIncludeVersions(false); setFocusId(''); setMarqueeRect(null);
+    setLibrary(snapshot); setManagement(null); setManagementError(''); setTag(''); setCollection(''); setReport(null); setSelected(null); setQuery(''); setSource('all'); setPage(1); setBackupNotice(null); setExportNotice(null); setScanReport(null); setCheckedIds(new Set()); setExpandedGroups(new Set()); setShowBatch(false); setFocusId(''); setMarqueeRect(null);
     anchorId.current = '';
-    autoScanRoot.current = '';
     try { setManagement(await getManagement()); } catch (reason) { setManagementError(String(reason)); }
   }
 
@@ -258,15 +248,8 @@ export default function App() {
 
   function exportSelection() {
     void run('正在导出素材', async () => {
-      if (!library) return;
-      let ids = checkedIds.size ? [...checkedIds] : filtered.map(item => item.id);
-      if (includeVersions && management) {
-        const expanded = new Set(ids);
-        for (const group of management.groups) {
-          if (group.memberIds.some(id => expanded.has(id))) group.memberIds.forEach(id => expanded.add(id));
-        }
-        ids = [...expanded];
-      }
+      if (!library || !checkedIds.size) return;
+      const ids = [...checkedIds];
       // nameMap must carry bare display names only; the manifest name retains
       // its original extension, which the Rust side strips when rebuilding.
       const nameMap = Object.fromEntries(displayItems.filter(item => ids.includes(item.id)).map(item => [item.id, management?.metadata[item.id]?.name || item.name.replace(/\.[a-z0-9]+$/i, '')]));
@@ -425,13 +408,6 @@ export default function App() {
     if (!library) throw new Error('请先打开资料库。');
     setManagement(await saveMetadata(library.root, assetId, metadata));
   }
-  async function importSourceReport(alias: string, accountId: string | null) {
-    await run('正在导入来源报告', async () => {
-      if (!library) throw new Error('请先打开资料库。');
-      const result = await importProvenance(library.root, alias, accountId);
-      if (result) { setManagement(result); setManagementNotice('报告已保存，完整性见“来源与精确去重”。'); }
-    });
-  }
   filteredRef.current = filtered;
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const visiblePage = Math.min(page, totalPages);
@@ -529,7 +505,7 @@ export default function App() {
     if (inSelectableView && ids.length) {
       const copyChildren: ContextMenuItem[] = collectionNames.map(name => ({ key: `copy:${name}`, label: `复制到「${name}」`, onSelect: () => labelCollection(ids, name, '') }));
       copyChildren.push({ key: 'sepcopy', label: '' }, { key: 'copy-new', label: '新建合集并加入…', onSelect: () => setShowNewCollection(true) });
-      items.push({ key: 'copy-col', label: collection ? '复制到合集' : '加入合集', children: copyChildren });
+      items.push({ key: 'copy-col', label: multi ? '批量加入合集' : collection ? '复制到合集' : '加入合集', children: copyChildren });
       if (collection) {
         const moveChildren: ContextMenuItem[] = collectionNames.filter(name => name !== collection).map(name => ({ key: `move:${name}`, label: `移动到「${name}」`, onSelect: () => labelCollection(ids, name, collection) }));
         moveChildren.push({ key: 'sepmove', label: '' }, { key: 'move-new', label: '新建合集并移入…', onSelect: () => setShowNewCollection(true) });
@@ -541,17 +517,12 @@ export default function App() {
     if (multi) {
       items.push(
         { key: 'rename', label: `批量重命名（${checkedIds.size} 项）`, onSelect: () => setShowBatch(true) },
-        { key: 'tags', label: `批量标签 / 合集（${checkedIds.size} 项）`, onSelect: () => setShowBatch(true) },
-        { key: 'group', label: `加入版本分组（${checkedIds.size} 项）`, disabled: checkedIds.size < 2, onSelect: () => { void createGroup(library!.root, ids, ids[0], [], []).then(setManagement).catch(reason => setError(String(reason))); setCheckedIds(new Set()); } },
+        { key: 'tags', label: `批量设置标签（${checkedIds.size} 项）`, onSelect: () => setShowBatch(true) },
         { key: 'sep2', label: '' },
         { key: 'export', label: `导出所选（${checkedIds.size} 项）`, onSelect: exportSelection },
       );
     }
     if (multi || target) items.push({ key: 'trash', label: multi ? `移入回收站（${checkedIds.size} 项）` : '移入回收站', danger: true, onSelect: () => { const trashIds = multi ? ids : [targetId]; void setTrash(library!.root, trashIds, true).then(setManagement).catch(reason => setError(String(reason))); setCheckedIds(new Set()); } });
-    items.push(
-      { key: 'sep3', label: '' },
-      { key: 'clear', label: '清除选择', onSelect: () => setCheckedIds(new Set()) },
-    );
     return items;
   }
 
@@ -648,6 +619,7 @@ export default function App() {
       </aside>
 
       <main className="workspace" aria-busy={!!busy}>
+        <div className="page-top">
         <header className="page-header">
           <h1>{heading}{headingCount !== null ? <span className="heading-count">{headingCount}</span> : null}</h1>
           <div className="page-actions">
@@ -668,11 +640,9 @@ export default function App() {
           {library ? <div className="toolbar-tail">
             <span className="filtered-count">{query || tag || collection ? `筛选出 ${filtered.length} 项` : `共 ${filtered.length} 项`}</span>
             <div className="view-switch" role="group" aria-label="显示模式">{VIEW_MODES.map(({ id, label, icon: Icon }) => <button key={id} type="button" className={view === id ? 'active' : ''} aria-pressed={view === id} title={label} onClick={() => setView(id)}><Icon size={15} /></button>)}</div>
-            {inSelectableView ? <label className="versions-check" title="导出时把所选素材所在分组的全部版本一并包括"><input type="checkbox" checked={includeVersions} onChange={event => setIncludeVersions(event.target.checked)} />含全部版本</label> : null}
-            {inSelectableView ? <button className="text-button slim" type="button" disabled={disabled || filtered.length === 0} onClick={exportSelection}><FolderOpen size={14} />{checkedIds.size ? `导出所选（${checkedIds.size}）` : '导出当前列表'}</button> : null}
           </div> : null}
         </div>}
-        {managementNotice ? <div className="notice success" role="status"><p>{managementNotice}</p><button className="icon-button" aria-label="关闭来源导入结果" onClick={() => setManagementNotice('')}><X size={17} /></button></div> : null}
+        </div>
         {backupNotice ? <div className="notice success" role="status"><CheckCircle2 size={18} /><div><strong>{backupNotice.text}</strong><p className="notice-path" title={backupNotice.path}>{backupNotice.path}</p></div><button className="icon-button" aria-label="关闭备份结果" onClick={() => setBackupNotice(null)}><X size={17} /></button></div> : null}
         {exportNotice ? <div className="notice success" role="status"><CheckCircle2 size={18} /><div><strong>已导出 {exportNotice.exported} 个素材{exportNotice.skipped ? `，跳过 ${exportNotice.skipped} 个` : ''}（原格式原字节）</strong><p className="notice-path" title={exportNotice.path}>{exportNotice.path}</p></div><button className="icon-button" aria-label="关闭导出结果" onClick={() => setExportNotice(null)}><X size={17} /></button></div> : null}
         {managementError ? <div className="notice error" role="alert"><div><strong>整理记录未能读取</strong><p>{managementError}</p><p>编辑已停用，原记录保留；修复整理文件后重开资料库。</p></div></div> : null}
@@ -683,7 +653,6 @@ export default function App() {
         {report ? <div className={`notice import-report ${report.failed.length ? 'warning' : 'success'}`} role="status"><CheckCircle2 size={18} /><div><strong>导入完成</strong><p>新增 {report.added} 个 · 重复 {report.duplicates} 个 · 失败 {report.failed.length} 个</p>{report.duplicates > 0 && trashSet.size > 0 ? <p>重复项未显示时，可能在回收站中。</p> : null}{report.failed.length ? <details><summary>查看失败文件</summary><ul>{report.failed.map((failure, index) => <li key={`${index}-${failure.name}`}><b>{failure.name}</b>：{failure.error}</li>)}</ul><p>修复后重新导入，已入库项会自动去重。</p></details> : null}</div><button className="icon-button" aria-label="关闭导入结果" onClick={() => setReport(null)}><X size={17} /></button></div> : null}
 
         {!library ? <section className="empty-state welcome"><span className="empty-icon"><Archive size={38} strokeWidth={1.4} /></span><h2>打开你的表情库</h2><p>把散落在各处的表情收进一个安静的画册。打开本地的 StickerNest Library 文件夹开始。</p><div className="empty-actions"><button className="button primary" disabled={disabled} onClick={openLibrary}><FolderOpen size={18} />打开资料库</button><button className="button secondary" disabled={disabled} onClick={restoreFromBackup}><ArchiveRestore size={18} />从备份恢复</button></div></section> : inReviewView ? <>
-        {management ? <ManagementPanel key={library.root} management={management} busy={disabled} onImport={importSourceReport} /> : null}
         {management ? <SimilarReview report={scanReport} scanning={busy === '正在扫描相似项'} items={library.items} root={library.root} existingGroups={management.groups} onKeep={keepOneAsset} onIgnorePair={ignoreSimilarPair} onRescan={runScan} /> : null}
         </> : visible.length === 0 ? <section className="empty-state"><span className="empty-icon">{inEmptyTrash ? <Trash2 size={36} strokeWidth={1.4} /> : <Images size={36} strokeWidth={1.4} />}</span><h2>{emptyTitle}</h2><p>{emptyHint}</p>{isFiltering ? <button className="button secondary" onClick={() => { setQuery(''); setTag(''); setCollection(''); setSource('all'); setPage(1); }}>查看全部表情</button> : source === 'trash' ? null : <button className="button primary" disabled={disabled} onClick={importFiles}><ArrowDownToLine size={18} />导入表情</button>}</section> : <>{showBatch && checkedIds.size ? <BatchPanel count={checkedIds.size} disabled={disabled} onRename={batchRenameSelected} onLabels={batchLabelsSelected} onTrash={trashSelected} onClose={() => setShowBatch(false)} /> : null}
         {view === 'list' ? <section className="sticker-rows" aria-label="表情列表" onMouseDown={startMarquee}><div className="sticker-row head"><span className="row-box" /><div className="row-card"><span className="row-thumb" /><span className="row-name">名称</span><span className="row-cell">格式</span><span className="row-cell">尺寸</span><span className="row-cell">大小</span><span className="row-cell">导入时间</span></div></div>{visible.map(renderListRow)}</section> : view === 'gallery' ? renderGallery() : <section className={`sticker-grid${view === 'small' ? ' compact' : ''}`} aria-label="表情列表" onMouseDown={startMarquee}>{visible.map(renderGridCell)}</section>}

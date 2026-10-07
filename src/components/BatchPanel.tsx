@@ -17,8 +17,6 @@ export function BatchPanel({ count, disabled, onRename, onLabels, onTrash, onClo
   const [start, setStart] = useState('1');
   const [addTags, setAddTags] = useState('');
   const [removeTags, setRemoveTags] = useState('');
-  const [addCollections, setAddCollections] = useState('');
-  const [removeCollections, setRemoveCollections] = useState('');
   const [confirmTrash, setConfirmTrash] = useState(false);
   const [saving, setSaving] = useState('');
   const [error, setError] = useState('');
@@ -50,17 +48,6 @@ export function BatchPanel({ count, disabled, onRename, onLabels, onTrash, onClo
         if (both.length) throw new Error(`“${both.join('、')}”同时在添加和移除中，请保留一边。`);
         return onLabels(add, remove, [], []);
       })}>应用标签</button>
-    </div>
-    <div className="batch-section">
-      <span className="batch-label">合集</span>
-      <input value={addCollections} disabled={!!saving} placeholder="批量加入，逗号分隔" aria-label="批量加入合集" onChange={event => setAddCollections(event.target.value)} />
-      <input value={removeCollections} disabled={!!saving} placeholder="批量移出，逗号分隔" aria-label="批量移出合集" onChange={event => setRemoveCollections(event.target.value)} />
-      <button className="button secondary" disabled={!!saving || disabled || (!addCollections.trim() && !removeCollections.trim())} onClick={() => void act('collections', () => {
-        const add = splitValues(addCollections), remove = splitValues(removeCollections);
-        const both = add.filter(v => remove.includes(v));
-        if (both.length) throw new Error(`“${both.join('、')}”同时在加入和移出中，请保留一边。`);
-        return onLabels([], [], add, remove);
-      })}>应用合集</button>
     </div>
     {error ? <p className="field-error" role="alert">{error}</p> : null}
     {!confirmTrash

@@ -35,12 +35,6 @@ export async function saveMetadata(expectedRoot: string, assetId: string, metada
   return invoke('save_metadata', { expectedRoot, assetId, ...metadata });
 }
 
-export async function importProvenance(expectedRoot: string, accountAlias: string, accountId: string | null): Promise<import('./types').ManagementSnapshot | null> {
-  const path = await open({ multiple: false, directory: false, title: '选择抖音本地采集报告', filters: [{ name: '采集报告', extensions: ['json'] }] });
-  if (!path) return null;
-  return invoke('import_provenance', { expectedRoot, path, accountAlias, accountId, platform: null });
-}
-
 export async function addCollection(expectedRoot: string, name: string): Promise<import('./types').ManagementSnapshot> {
   return invoke('add_collection', { expectedRoot, name });
 }
