@@ -557,6 +557,7 @@ pub fn run() {
             get_management,
             save_metadata,
             import_provenance,
+            add_collection,
             batch_rename,
             batch_labels,
             set_trash,
