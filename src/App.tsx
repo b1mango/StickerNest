@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, ArchiveRestore, ArrowDownToLine, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Folder, FolderOpen, FolderPlus, GalleryHorizontal, Grid3X3, HardDriveDownload, Images, LayoutGrid, List, LoaderCircle, MessageCircle, Music2, ScanSearch, Search, Trash2, X } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowDownToLine, Check, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Folder, FolderOpen, FolderPlus, GalleryHorizontal, Grid3X3, HardDriveDownload, Images, LayoutGrid, List, LoaderCircle, MessageCircle, Music2, ScanSearch, Search, Trash2, X } from 'lucide-react';
 import { chooseLibrary, currentLibrary, imageUrl, importImages, isDesktop, getManagement, saveMetadata, setTrash, backupLibrary, restoreBackup, openLibraryPath, scanDuplicates, disbandGroup, ignorePair, exportAssets, saveGroupMetadata, batchRename, batchLabels, addCollection } from './api';
 import { SOURCE_LABELS, formatBytes, type ExportSummary, type ImportReport, type ScanReport, type Snapshot, type Sticker, type ManagementSnapshot, type AssetMetadata } from './types';
 import { StickerDetail } from './components/StickerDetail';
@@ -569,6 +569,16 @@ export default function App() {
     return items;
   }
 
+  /** DOM 勾选框：打勾是真实 SVG（不依赖 CSS data-uri，WebKit 稳出）。 */
+  function selectBox(item: Sticker, isChecked: boolean) {
+    if (!inSelectableView) return null;
+    return <span className={`select-box${isChecked ? ' checked' : ''}`} role="checkbox" aria-checked={isChecked} aria-label={`选择 ${item.name}`} tabIndex={0}
+      onClick={event => { event.stopPropagation(); handleSelect(item, event); }}
+      onKeyDown={event => { if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); handleSelect(item, event); } }}>
+      {isChecked ? <Check size={14} strokeWidth={4} /> : null}
+    </span>;
+  }
+
   function renderBadges(item: Sticker) {
     const group = groupByMain.get(item.id);
     if (!group) return null;
@@ -581,7 +591,7 @@ export default function App() {
     const memberItems = group ? group.memberIds.map(id => library!.items.find(original => original.id === id)).filter((value): value is Sticker => !!value) : [];
     return <Fragment key={item.id}>
       <div className="sticker-cell" data-marquee-id={item.id}>
-        {inSelectableView ? <input className="select-box" type="checkbox" aria-label={`选择 ${item.name}`} checked={isChecked} onChange={event => handleSelect(item, event.nativeEvent as MouseEvent)} /> : null}
+        {selectBox(item, isChecked)}
         <button className={`sticker-card${isChecked ? ' checked' : ''}`} onClick={event => inSelectableView ? handleSelect(item, event) : setSelected(item)} onContextMenu={event => openCardMenu(event, item)} aria-label={`选择 ${item.name}`} aria-pressed={isChecked}>
           <div className="sticker-image"><StickerPreview key={`${library!.root}/${item.fileName}`} src={imageUrl(library!.root, item.fileName)} name={item.name} />{renderBadges(item)}</div>
           <div className="sticker-info"><strong title={item.name}>{shortDisplayName(item.name)}</strong><span>{item.sources.map(origin => SOURCE_LABELS[origin] ?? origin).join(' / ')}<span>{formatBytes(item.bytes)}</span></span></div>
@@ -596,7 +606,7 @@ export default function App() {
     const group = groupByMain.get(item.id);
     const isChecked = checkedIds.has(item.id);
     return <div className="sticker-row" key={item.id} data-marquee-id={item.id}>
-      {inSelectableView ? <input className="select-box row-box" type="checkbox" aria-label={`选择 ${item.name}`} checked={isChecked} onChange={event => handleSelect(item, event.nativeEvent as MouseEvent)} /> : <span className="row-box" />}
+      {inSelectableView ? selectBox(item, isChecked) : <span className="row-box" />}
       <button className={`row-card${isChecked ? ' checked' : ''}`} onClick={event => inSelectableView ? handleSelect(item, event) : setSelected(item)} onContextMenu={event => openCardMenu(event, item)} aria-label={`选择 ${item.name}`} aria-pressed={isChecked}>
         <span className="row-thumb"><StickerPreview src={imageUrl(library!.root, item.fileName)} name={item.name} /></span>
         <span className="row-name"><strong title={item.name}>{shortDisplayName(item.name)}</strong><span>{item.sources.map(origin => SOURCE_LABELS[origin] ?? origin).join(' / ')}{group ? ` · 版本分组 ${group.memberIds.length} 项` : ''}</span></span>
@@ -620,7 +630,7 @@ export default function App() {
         {visible.map(item => {
           const isChecked = checkedIds.has(item.id);
           return <div className="gallery-thumb" key={item.id} data-marquee-id={item.id}>
-            {inSelectableView ? <input className="select-box" type="checkbox" aria-label={`选择 ${item.name}`} checked={isChecked} onChange={event => handleSelect(item, event.nativeEvent as MouseEvent)} /> : null}
+            {selectBox(item, isChecked)}
             <button className={`gallery-thumb-btn${item.id === focusItem?.id ? ' focused' : ''}${isChecked ? ' checked' : ''}`} role="option" aria-selected={item.id === focusItem?.id} title={item.name} onClick={event => { setFocusId(item.id); if (event.shiftKey) handleSelect(item, event); }} onContextMenu={event => { setFocusId(item.id); openCardMenu(event, item); }}>
               <StickerPreview src={imageUrl(library!.root, item.fileName)} name={item.name} />
             </button>

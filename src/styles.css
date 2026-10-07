@@ -46,7 +46,11 @@ svg { flex-shrink: 0; }
 h1, h2, p { margin: 0; }
 button { color: inherit; }
 .app-shell { display: grid; grid-template-columns: 220px minmax(0, 1fr); height: 100vh; }
-.sidebar { display: flex; flex-direction: column; padding: 32px 16px 20px; border-right: 1px solid var(--rule); background: var(--paper); height: 100vh; position: sticky; top: 0; }
+/* 隐藏原生标题栏后，侧栏与页头充当窗口拖拽区；可交互控件排除 */
+.sidebar { display: flex; flex-direction: column; padding: 32px 16px 20px; border-right: 1px solid var(--rule); background: var(--paper); height: 100vh; position: sticky; top: 0; -webkit-app-region: drag; }
+.sidebar button, .sidebar input, .sidebar select, .sidebar a { -webkit-app-region: no-drag; }
+.page-top { -webkit-app-region: drag; }
+.page-top button, .page-top input, .page-top select, .page-top a, .page-top .library-menu { -webkit-app-region: no-drag; }
 .brand { display: flex; align-items: center; gap: 12px; padding: 0 12px; margin-bottom: 34px; }
 .brand-icon { width: 44px; height: 44px; display: block; object-fit: contain; }
 .brand strong { display: block; font-size: 23px; letter-spacing: 2px; line-height: 1.25; font-weight: 650; }
@@ -129,7 +133,10 @@ h1 { display: flex; align-items: center; gap: 14px; font-size: 26px; font-weight
 .empty-actions { display: flex; align-items: center; gap: 12px; margin-top: 28px; }
 .empty-state > .empty-note { font-size: 11px; color: var(--ink-muted); margin-top: 24px; }
 .sticker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(152px, 1fr)); gap: 24px 20px; padding-top: 20px; }
-.sticker-cell { position: relative; min-width: 0; }
+/* 快速滚动优化：视口外的单元格跳过渲染，布局尺寸由 contain-intrinsic-size 保底 */
+.sticker-cell { position: relative; min-width: 0; content-visibility: auto; contain-intrinsic-size: auto 236px; }
+.sticker-row { content-visibility: auto; contain-intrinsic-size: auto 62px; }
+.gallery-thumb { content-visibility: auto; contain-intrinsic-size: 84px 84px; }
 .sticker-card { min-width: 0; width: 100%; display: block; border: 0; padding: 0; background: none; text-align: left; border-radius: var(--radius-card); transition: transform var(--dur-med) var(--ease-out), box-shadow var(--dur-med) var(--ease-out); }
 .sticker-card:hover { transform: translateY(-2px); }
 .sticker-card:hover .sticker-image { box-shadow: var(--elev-1); }
@@ -200,6 +207,7 @@ h1 { display: flex; align-items: center; gap: 14px; font-size: 26px; font-weight
   .detail-preview { height: 220px; }
 }
 @media (prefers-reduced-motion: reduce) { .spin { animation: none; } button:active:not(:disabled) { transform: none; } }
+.field-hint { color: var(--ink-secondary); font-size: 11px; line-height: 1.8; }
 .field-label { display: grid; gap: 8px; color: var(--ink-secondary); font-size: 12px; min-width: 0; }
 .field-label input, .field-label select { min-height: 44px; min-width: 0; width: 100%; color: var(--ink); background: var(--paper-inset); border: 1px solid var(--rule); border-radius: var(--radius-control); padding: 10px 12px; }
 .metadata-editor { display: grid; gap: 16px; margin-top: 20px; }
@@ -216,11 +224,11 @@ h1 { display: flex; align-items: center; gap: 14px; font-size: 26px; font-weight
 .notice-path { font-size: 11px; color: var(--ink-secondary); overflow-wrap: anywhere; }
 .busy-overlay { position: fixed; inset: 0; z-index: 999; cursor: progress; }
 
-/* 选中系统：44px 命中的自绘方框复选 + 卡片染色。hover 与选中严格区分：
+/* 选中系统：自绘方框复选（DOM SVG 打勾）+ 卡片染色。hover 与选中严格区分：
    hover 只加深边框，选中方获得森林绿底与白色打勾。 */
-.select-box { position: absolute; top: 10px; left: 10px; width: 22px; height: 22px; margin: 0; padding: 0; appearance: none; -webkit-appearance: none; border: 1.5px solid var(--rule-strong); border-radius: 6px; background: color-mix(in srgb, var(--paper-raised) 82%, transparent); opacity: 0; z-index: 2; transition: opacity .12s ease-out, background-color .12s ease-out, border-color .12s ease-out; }
-.select-box::before { content: ''; position: absolute; inset: -11px; }
-.select-box:checked { opacity: 1; background: var(--forest); border-color: var(--forest); background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fffefa' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E"); background-size: 14px; background-position: center; background-repeat: no-repeat; }
+.select-box { position: absolute; top: 10px; left: 10px; width: 22px; height: 22px; display: grid; place-items: center; border: 1.5px solid var(--rule-strong); border-radius: 6px; background: color-mix(in srgb, var(--paper-raised) 82%, transparent); color: var(--paper-raised); opacity: 0; z-index: 2; cursor: pointer; transition: opacity .12s ease-out, background-color .12s ease-out, border-color .12s ease-out; }
+.select-box svg { display: block; }
+.select-box.checked { opacity: 1; background: var(--forest); border-color: var(--forest); }
 .sticker-cell:hover .select-box, .select-box:focus-visible { opacity: 1; }
 .sticker-card.checked .sticker-image { border-color: var(--forest); background: var(--forest-wash); }
 .sticker-card.checked .sticker-image img { opacity: .9; }
@@ -235,6 +243,7 @@ h1 { display: flex; align-items: center; gap: 14px; font-size: 26px; font-weight
 .batch-section { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .batch-section input { flex: 1 1 180px; max-width: 240px; min-height: 40px; color: var(--ink); background: var(--paper-raised); border: 1px solid var(--rule); border-radius: var(--radius-control); padding: 8px 10px; font-size: 12px; }
 .batch-section input.batch-number { flex: 0 0 96px; max-width: 96px; }
+.batch-section .field-hint { flex: 0 0 100%; margin-top: -6px; }
 .batch-label { font-size: 11px; color: var(--ink-secondary); min-width: 44px; }
 .text-button.danger-link { color: var(--danger); justify-self: start; }
 .collect-dialog { max-width: 620px; width: min(92vw, 620px); }
@@ -311,12 +320,12 @@ h1 { display: flex; align-items: center; gap: 14px; font-size: 26px; font-weight
 .sticker-grid.compact .sticker-info > span { font-size: 9px; margin-top: 3px; }
 .sticker-grid.compact .group-tray { display: none; }
 .sticker-grid.compact .select-box { top: 6px; left: 6px; width: 18px; height: 18px; }
-.sticker-grid.compact .select-box:checked { background-size: 11px; }
+.sticker-grid.compact .select-box svg { width: 12px; height: 12px; }
 
 .sticker-rows { display: grid; gap: 1px; padding-top: 16px; }
 .sticker-row { display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: center; gap: 10px; padding: 0 6px; }
 .sticker-row .select-box { position: relative; inset: auto; width: 20px; height: 20px; opacity: 1; }
-.sticker-row .select-box::before { display: none; }
+.sticker-row .select-box { cursor: pointer; }
 .row-box { width: 20px; height: 20px; }
 .row-card { display: grid; grid-template-columns: 42px minmax(160px, 1.8fr) 60px 90px 80px 120px; align-items: center; gap: 12px; width: 100%; padding: 6px 10px; border: 0; background: transparent; border-radius: var(--radius-control); text-align: left; color: inherit; }
 button.row-card:hover:not(:disabled) { background: var(--paper-inset); }
@@ -348,7 +357,7 @@ button.row-card:hover:not(:disabled) { background: var(--paper-inset); }
 .gallery-strip { display: flex; gap: 10px; overflow-x: auto; padding: 4px 2px 14px; }
 .gallery-thumb { position: relative; flex: 0 0 auto; width: 84px; height: 84px; }
 .gallery-thumb .select-box { top: 6px; left: 6px; width: 18px; height: 18px; }
-.gallery-thumb .select-box:checked { background-size: 11px; }
+.gallery-thumb .select-box svg { width: 12px; height: 12px; }
 .gallery-thumb:hover .select-box, .gallery-thumb .select-box:focus-visible { opacity: 1; }
 .gallery-thumb-btn { width: 100%; height: 100%; padding: 6px; border: 1px solid var(--rule); border-radius: var(--radius-control); background: var(--paper-raised); display: flex; align-items: center; justify-content: center; }
 .gallery-thumb-btn img { max-width: 100%; max-height: 100%; object-fit: contain; }
