@@ -126,7 +126,7 @@ async function main() {
     })()`,
     awaitPromise: true,
     returnByValue: true,
-  });
+  }).finally(() => socket.close());
   const value = result?.result?.value;
   if (!value) {
     const exception = result?.exceptionDetails?.exception?.description

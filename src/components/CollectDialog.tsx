@@ -3,7 +3,7 @@ import { X } from 'lucide-react';
 import { collectDouyinFetch, collectDouyinImport, importProvenanceAtPath } from '../api';
 import type { ImportReport, ManagementSnapshot } from '../types';
 
-const CHROME_HINT = '需要：1) 本机装有 Node.js、python3 与 Pillow；2) 用调试模式启动的 Chrome 并登录抖音网页版，点开一次私信里的表情收藏面板（不用发送）。启动命令示例：/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote-debugging-port=9222 --user-data-dir=~/chrome-debug（新的目录里需要重新登录抖音）。从项目目录运行（npm run desktop）时采集脚本才能被找到。';
+const CHROME_HINT = '请用调试模式启动 Chrome，登录抖音网页版，并点开一次私信里的表情收藏面板（不用发送）。启动命令示例：/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote-debugging-port=9222 --user-data-dir=~/chrome-debug（新目录需要重新登录抖音）。';
 
 type RunState =
   | { phase: 'idle' }

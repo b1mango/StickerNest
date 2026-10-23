@@ -9,7 +9,10 @@
     "tauri": "tauri",
     "desktop": "tauri dev",
     "test:core": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "desktop:build": "node scripts/build-desktop.mjs"
+    "desktop:build": "node scripts/build-desktop.mjs",
+    "prepare:runtime": "node scripts/prepare-collection-runtime.mjs",
+    "test:frontend": "node --test tests/frontend-regressions.mjs",
+    "test:runtime": "node tests/collection-runtime.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

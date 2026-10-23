@@ -4,9 +4,9 @@
   "version": "0.0.1",
   "identifier": "local.stickernest.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run prepare:runtime && npm run dev",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run prepare:runtime && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -41,7 +41,8 @@
     ],
     "resources": {
       "../tools/wechat-key-dumper/wechat-key-dumper.dylib": "wechat-key-dumper.dylib",
-      "../tools/bookmark-helper/bookmark-helper.dylib": "bookmark-helper.dylib"
+      "../tools/bookmark-helper/bookmark-helper.dylib": "bookmark-helper.dylib",
+      "../output/collection-runtime/": "collection-runtime/"
     },
     "macOS": {
       "entitlements": "entitlements.plist",

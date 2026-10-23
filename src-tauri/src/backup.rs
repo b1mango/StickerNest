@@ -3,6 +3,7 @@
 //! manifest complete. Restore copies a complete backup into a new directory, verifies
 //! hashes again, then validates the result by opening it as a library.
 use crate::library::Library;
+use crate::collection_runtime::CollectionRuntime;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -478,28 +479,21 @@ impl Library {
     /// under downloads/ inside the library; assets are imported in stage 2.
     pub fn collect_douyin_fetch(
         &self,
-        scripts_dir: &Path,
+        runtime: &CollectionRuntime,
         chrome_port: u16,
     ) -> Result<CollectStageResult, String> {
         let root = PathBuf::from(self.snapshot().root);
         let downloads = root.join("downloads");
         fs::create_dir_all(&downloads).map_err(|e| format!("无法创建采集目录：{e}"))?;
         let list_path = downloads.join("stickers.json");
-        let collector = scripts_dir.join("collect_douyin.mjs");
-        if !collector.is_file() {
-            return Err(format!(
-                "缺少采集脚本 collect_douyin.mjs（搜索位置：{}）。请用 npm run desktop 从项目目录启动应用。",
-                scripts_dir.display()
-            ));
-        }
-        let output = std::process::Command::new("node")
-            .arg(&collector)
+        let output = runtime.node()
+            .arg(runtime.script("collect_douyin.mjs"))
             .arg("--out")
             .arg(&list_path)
             .arg("--port")
             .arg(chrome_port.to_string())
             .output()
-            .map_err(|e| format!("无法启动 node（请先安装 Node.js）：{e}"))?;
+            .map_err(|e| format!("无法启动内置采集运行时：{e}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("收藏清单读取未完成：{}", stderr.trim()));
@@ -510,16 +504,12 @@ impl Library {
         if stickers.is_empty() {
             return Err("收藏清单为空".into());
         }
-        let downloader = scripts_dir.join("download_douyin.py");
-        if !downloader.is_file() {
-            return Err("缺少下载脚本 download_douyin.py".into());
-        }
-        let output = std::process::Command::new("python3")
-            .arg(&downloader)
+        let output = runtime.python()
+            .arg(runtime.script("download_douyin.py"))
             .arg(&list_path)
             .arg(&downloads)
             .output()
-            .map_err(|e| format!("无法启动 python3：{e}"))?;
+            .map_err(|e| format!("无法启动内置下载运行时：{e}"))?;
         if !output.status.success() {
             // The downloader prints per-item and summary failures to stdout.
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -543,30 +533,23 @@ impl Library {
     /// staged under downloads/wechat/ so it never collides with Douyin data.
     pub fn import_wechat_manifest(
         &self,
-        scripts_dir: &Path,
+        runtime: &CollectionRuntime,
         manifest_path: &Path,
     ) -> Result<CollectStageResult, String> {
         if !manifest_path.is_file() {
             return Err("清单文件不存在，请选择 wxemoticon 导出的 emoticon_urls.txt".into());
-        }
-        let downloader = scripts_dir.join("download_wechat.py");
-        if !downloader.is_file() {
-            return Err(format!(
-                "缺少下载脚本 download_wechat.py（搜索位置：{}）。请用 npm run desktop 从项目目录启动应用。",
-                scripts_dir.display()
-            ));
         }
         let downloads = PathBuf::from(self.snapshot().root).join("downloads").join("wechat");
         fs::create_dir_all(&downloads).map_err(|e| format!("无法创建下载目录：{e}"))?;
         let manifest_dest = downloads.join("manifest.txt");
         fs::copy(manifest_path, &manifest_dest)
             .map_err(|e| format!("无法保存清单副本：{e}"))?;
-        let output = std::process::Command::new("python3")
-            .arg(&downloader)
+        let output = runtime.python()
+            .arg(runtime.script("download_wechat.py"))
             .arg(&manifest_dest)
             .arg(&downloads)
             .output()
-            .map_err(|e| format!("无法启动 python3:{e}"))?;
+            .map_err(|e| format!("无法启动内置下载运行时:{e}"))?;
         // exit 2 = partial failure: still acceptable when something downloaded.
         let stdout = String::from_utf8_lossy(&output.stdout);
         let summary: serde_json::Value = serde_json::from_str(stdout.trim().lines().last().unwrap_or(""))
@@ -647,7 +630,6 @@ impl Library {
 
 #[cfg(test)]
 mod tests {
-    static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use super::*;
     fn fixture() -> (tempfile::TempDir, Library, Vec<String>) {
         let dir = tempfile::tempdir().unwrap();
@@ -878,7 +860,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn collect_pipeline_runs_collector_then_downloader() {
-        let _path_guard = PATH_LOCK.lock().unwrap();
         use std::os::unix::fs::PermissionsExt;
         // Shim "node" records the invocation and writes a two-sticker list.
         let (dir, mut lib, _ids) = fixture();
@@ -891,10 +872,11 @@ mod tests {
             "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--out\" ]; then out=\"$2\"; shift 2; continue; fi\n  shift\ndone\nprintf '[{\"id_str\":\"1\",\"animate_url\":{\"url_list\":[\"https://p3-im-emoticon-sign.byteimg.com/a.webp\"]}},{\"id_str\":\"2\",\"static_url\":{\"url_list\":[\"https://p3-im-emoticon-sign.byteimg.com/b.webp\"]}}]' > \"$out\"\necho found 2 >&2\n",
         )
         .unwrap();
-        let python_shim = shim.join("python3");
+        fs::create_dir_all(shim.join("python/bin")).unwrap();
+        let python_shim = shim.join("python/bin/python3");
         fs::write(
             &python_shim,
-            "#!/bin/sh\ndest=\"$3\"\nmkdir -p \"$dest/originals\"\npython3 - \"$dest\" <<'PY2' 2>/dev/null || true\nPY2\nexit 0\n",
+            "#!/bin/sh\ndest=\"$5\"\nmkdir -p \"$dest/originals\"\npython3 - \"$dest\" <<'PY2' 2>/dev/null || true\nPY2\nexit 0\n",
         )
         .unwrap();
         let mut permissions = fs::metadata(&node_shim).unwrap().permissions();
@@ -904,18 +886,15 @@ mod tests {
         // python shim needs to actually create originals; use printf-based png.
         fs::write(
             &python_shim,
-            "#!/bin/sh\ndest=\"$3\"\nmkdir -p \"$dest/originals\"\ntouch \"$dest/report.json\"\nexit 0\n",
+            "#!/bin/sh\ndest=\"$5\"\nmkdir -p \"$dest/originals\"\ntouch \"$dest/report.json\"\nexit 0\n",
         )
         .unwrap();
         fs::set_permissions(&python_shim, fs::metadata(&node_shim).unwrap().permissions()).unwrap();
-        let old_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{shim}:{old_path}", shim = shim.display()));
-        let scripts = dir.path().join("scripts");
+        let scripts = shim.join("scripts");
         fs::create_dir(&scripts).unwrap();
         fs::write(scripts.join("collect_douyin.mjs"), "// shim\n").unwrap();
         fs::write(scripts.join("download_douyin.py"), "# shim\n").unwrap();
-        let result = lib.collect_douyin_fetch(&scripts, 9222);
-        std::env::set_var("PATH", old_path);
+        let result = lib.collect_douyin_fetch(&CollectionRuntime::fixture(&shim), 9222);
         let result = result.unwrap();
         assert_eq!(result.stage, "fetch");
         assert!(result.detail.contains("2 项"));
@@ -923,16 +902,16 @@ mod tests {
     }
     #[test]
     fn wechat_manifest_downloads_and_imports_with_account_mapping() {
-        let _path_guard = PATH_LOCK.lock().unwrap();
         // Shim python3 that decodes nothing but stages two tiny PNG originals.
         use std::os::unix::fs::PermissionsExt;
         let (dir, lib, _ids) = fixture();
         let root = PathBuf::from(lib.snapshot().root);
         let shim = dir.path().join("shim");
         fs::create_dir(&shim).unwrap();
-        let downloader = shim.join("python3");
+        fs::create_dir_all(shim.join("python/bin")).unwrap();
+        let downloader = shim.join("python/bin/python3");
         let shim_script = format!(
-            "#!/bin/sh\ndest=\"$3\"\nmkdir -p \"$dest/originals\"\ncp '{src}/a.png' \"$dest/originals/$(/usr/bin/shasum -a 256 '{src}/a.png' | cut -c1-64).png\"\ncp '{src}/b.png' \"$dest/originals/$(/usr/bin/shasum -a 256 '{src}/b.png' | cut -c1-64).png\"\ncp '{src}/report.json' \"$dest/report.json\"\nprintf '{{\"total\":2,\"verified\":2,\"failed\":0,\"skipped\":0}}'\n\nexit 0\n",
+            "#!/bin/sh\ndest=\"$5\"\nmkdir -p \"$dest/originals\"\ncp '{src}/a.png' \"$dest/originals/$(/usr/bin/shasum -a 256 '{src}/a.png' | cut -c1-64).png\"\ncp '{src}/b.png' \"$dest/originals/$(/usr/bin/shasum -a 256 '{src}/b.png' | cut -c1-64).png\"\ncp '{src}/report.json' \"$dest/report.json\"\nprintf '{{\"total\":2,\"verified\":2,\"failed\":0,\"skipped\":0}}'\n\nexit 0\n",
             src = shim.display()
         );
         fs::write(&downloader, shim_script)
@@ -958,17 +937,14 @@ mod tests {
                 {"id": "2", "status": "pending_inspection", "resource_identity": "c".repeat(64)}
             ]
         })).unwrap()).unwrap();
-        let old_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{}", shim.display(), old_path));
-        let scripts = dir.path().join("scripts");
+        let scripts = shim.join("scripts");
         fs::create_dir(&scripts).unwrap();
         fs::write(scripts.join("download_wechat.py"), "# shim\n").unwrap();
         let manifest = dir.path().join("emoticon_urls.txt");
         fs::write(&manifest, "https://mmbiz.qpic.cn/a
 https://mmbiz.qpic.cn/b
 ").unwrap();
-        let staged = lib.import_wechat_manifest(&scripts, &manifest);
-        std::env::set_var("PATH", old_path);
+        let staged = lib.import_wechat_manifest(&CollectionRuntime::fixture(&shim), &manifest);
         let staged = staged.unwrap();
         assert!(staged.detail.contains("下载成功 2"));
         // Import + map to a WeChat account.
@@ -988,14 +964,14 @@ https://mmbiz.qpic.cn/b
     }
     #[test]
     fn wechat_manifest_partial_failure_still_proceeds() {
-        let _path_guard = PATH_LOCK.lock().unwrap();
         use std::os::unix::fs::PermissionsExt;
         let (dir, lib, _ids) = fixture();
         let shim = dir.path().join("shim");
         fs::create_dir(&shim).unwrap();
-        let downloader = shim.join("python3");
+        fs::create_dir_all(shim.join("python/bin")).unwrap();
+        let downloader = shim.join("python/bin/python3");
         let shim_script = format!(
-            "#!/bin/sh\ndest=\"$3\"\nmkdir -p \"$dest/originals\"\ncp '{src}/a.png' \"$dest/originals/a.png\"\nprintf '{{\"total\":3,\"verified\":1,\"failed\":2,\"skipped\":0}}'\necho 'failed items' >&2\nexit 2\n",
+            "#!/bin/sh\ndest=\"$5\"\nmkdir -p \"$dest/originals\"\ncp '{src}/a.png' \"$dest/originals/a.png\"\nprintf '{{\"total\":3,\"verified\":1,\"failed\":2,\"skipped\":0}}'\necho 'failed items' >&2\nexit 2\n",
             src = shim.display()
         );
         fs::write(&downloader, shim_script).unwrap();
@@ -1005,16 +981,13 @@ https://mmbiz.qpic.cn/b
         image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 1, 1, 255]))
             .save(shim.join("a.png"))
             .unwrap();
-        let old_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{}", shim.display(), old_path));
-        let scripts = dir.path().join("scripts");
+        let scripts = shim.join("scripts");
         fs::create_dir(&scripts).unwrap();
         fs::write(scripts.join("download_wechat.py"), "# shim\n").unwrap();
         let manifest = dir.path().join("urls.txt");
         fs::write(&manifest, "https://mmbiz.qpic.cn/a
 ").unwrap();
-        let staged = lib.import_wechat_manifest(&scripts, &manifest);
-        std::env::set_var("PATH", old_path);
+        let staged = lib.import_wechat_manifest(&CollectionRuntime::fixture(&shim), &manifest);
         let staged = staged.unwrap();
         assert!(staged.detail.contains("下载成功 1 · 失败 2"));
     }
@@ -1052,14 +1025,9 @@ https://mmbiz.qpic.cn/b
     #[test]
     fn wechat_manifest_requires_existing_file_and_script() {
         let (dir, lib, _ids) = fixture();
-        let scripts = dir.path().join("scripts");
-        fs::create_dir(&scripts).unwrap();
-        assert!(lib.import_wechat_manifest(&scripts, &dir.path().join("missing.txt")).is_err());
-        fs::write(dir.path().join("urls.txt"), "https://mmbiz.qpic.cn/a
-").unwrap();
-        assert!(lib
-            .import_wechat_manifest(&scripts, &dir.path().join("urls.txt"))
-            .is_err());
+        let runtime = CollectionRuntime::fixture(dir.path());
+        assert!(lib.import_wechat_manifest(&runtime, &dir.path().join("missing.txt")).is_err());
+        assert!(CollectionRuntime::at(dir.path().to_path_buf()).is_err());
     }
 
     #[test]

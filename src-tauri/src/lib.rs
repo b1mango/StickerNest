@@ -1,5 +1,6 @@
 pub mod backup;
 pub mod bookmark;
+pub mod collection_runtime;
 pub mod library;
 pub mod management;
 pub mod similar;
@@ -195,12 +196,13 @@ fn add_collection(
     state: State<'_, LibraryState>,
     expected_root: String,
     name: String,
+    asset_ids: Vec<String>,
 ) -> Result<ManagementSnapshot, String> {
     let current = state.0.lock().map_err(|_| "资料库忙")?;
     current
         .as_ref()
         .ok_or("请先打开资料库")?
-        .add_collection_name(&expected_root, name)
+        .add_collection_name(&expected_root, name, asset_ids)
 }
 #[tauri::command]
 fn set_trash(
@@ -328,11 +330,11 @@ async fn collect_douyin_fetch(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<LibraryState>();
         let current = state.0.lock().map_err(|_| "资料库忙，请稍后再试")?;
-        let scripts = scripts_dir();
+        let runtime = collection_runtime(&app)?;
         current
             .as_ref()
             .ok_or("请先打开资料库")?
-            .collect_douyin_fetch(&scripts, chrome_port.unwrap_or(9222))
+            .collect_douyin_fetch(&runtime, chrome_port.unwrap_or(9222))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -357,27 +359,15 @@ async fn collect_douyin_import(app: tauri::AppHandle) -> Result<CollectImportRes
     .map_err(|e| e.to_string())?
 }
 
-/// Scripts live next to the project, both in `tauri dev` (cwd = src-tauri)
-/// and when started from the project root. Double-clicking the .app leaves
-/// cwd elsewhere; probe from the executable's ancestors as well.
-fn scripts_dir() -> PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut candidates = vec![cwd.join("scripts"), cwd.join("../scripts")];
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(anchor) = exe.parent() {
-            for ancestor in anchor.ancestors() {
-                candidates.push(ancestor.join("scripts"));
-            }
-        }
-    }
-    for candidate in candidates {
-        if candidate.join("collect_douyin.mjs").is_file()
-            || candidate.join("download_wechat.py").is_file()
-        {
-            return candidate;
-        }
-    }
-    cwd.join("scripts")
+fn collection_runtime(app: &tauri::AppHandle) -> Result<collection_runtime::CollectionRuntime, String> {
+    let root = app.path().resource_dir().map_err(|e| e.to_string())?.join("collection-runtime");
+    // A debug .app uses its bundled resources too; only tauri dev needs the
+    // build-prepared runtime beside the project.
+    #[cfg(debug_assertions)]
+    let root = if root.is_dir() { root } else {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../output/collection-runtime")
+    };
+    collection_runtime::CollectionRuntime::at(root)
 }
 
 #[derive(Serialize)]
@@ -397,11 +387,11 @@ async fn import_wechat_manifest(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<LibraryState>();
         let current = state.0.lock().map_err(|_| "资料库忙，请稍后再试")?;
-        let scripts = scripts_dir();
+        let runtime = collection_runtime(&app)?;
         current
             .as_ref()
             .ok_or("请先打开资料库")?
-            .import_wechat_manifest(&scripts, Path::new(&manifest_path))
+            .import_wechat_manifest(&runtime, Path::new(&manifest_path))
     })
     .await
     .map_err(|e| e.to_string())?

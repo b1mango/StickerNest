@@ -122,6 +122,9 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
+      const target = event.target as HTMLElement | null;
+      if (document.querySelector('dialog[open]') || target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]')) return;
       if (event.key === 'Escape') {
         if (event.defaultPrevented || document.querySelector('dialog[open]')) return;
         if (showMenuRef.current) { setShowMenu(false); return; }
@@ -292,7 +295,13 @@ export default function App() {
   async function ignoreSimilarPair(a: string, b: string) {
     if (!library) throw new Error('请先打开资料库。');
     setManagement(await ignorePair(library.root, a, b));
-    pruneReviewed([a, b]);
+    const matches = (pair: { baseId: string; otherId: string }) =>
+      (pair.baseId === a && pair.otherId === b) || (pair.baseId === b && pair.otherId === a);
+    setScanReport(current => current ? {
+      ...current,
+      similarPairs: current.similarPairs.filter(pair => !matches(pair)),
+      animationPairs: current.animationPairs.filter(pair => !matches(pair)),
+    } : current);
   }
 
   function exportSelection() {
@@ -377,16 +386,13 @@ export default function App() {
     if (!library) throw new Error('请先打开资料库。');
     const existing = new Set([...(management?.collections ?? []), ...collectionEntries.map(([entry]) => entry)]);
     if (existing.has(name)) throw new Error(`合集“${name}”已存在。`);
-    await run('正在创建合集', async () => {
-      if (!library) return;
-      let next = await addCollection(library.root, name);
-      if (checkedIds.size) {
-        next = await batchLabels(library.root, selectedInDisplayOrder(), [], [], [name], []);
-        setCheckedIds(new Set());
-      }
-      setManagement(next);
-    });
-    setCollection(name); setSource('all'); setPage(1); setShowNewCollection(false);
+    if (locked.current || busy || !isDesktop) throw new Error('资料库忙，请稍后重试。');
+    locked.current = true; setBusy('正在创建合集'); setError('');
+    try {
+      const next = await addCollection(library.root, name, selectedInDisplayOrder());
+      setManagement(next); setCheckedIds(new Set());
+      setCollection(name); setSource('all'); setPage(1); setShowNewCollection(false);
+    } finally { locked.current = false; setBusy(''); }
   }
 
   const trashSet = useMemo(() => new Set(Object.keys(management?.trash ?? {})), [management]);

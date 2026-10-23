@@ -30,7 +30,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin import-local -- \
 
 ## Development
 
-Requires Node.js, Rust, and macOS Command Line Tools.
+Requires Node.js 24.22.1, Rust, and macOS Command Line Tools. Prepare relocatable CPython 3.11 and Pillow 13.0.0 with uv (`uv run --python 3.11 --with pillow==13.0.0 python -c "import PIL"`), or set `STICKERNEST_PYTHON` to an equivalent environment. The build bundles local runtimes; installed apps do not require Node.js or Python.
 
 ```sh
 npm ci

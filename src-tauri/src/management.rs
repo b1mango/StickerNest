@@ -445,6 +445,7 @@ impl Library {
         &self,
         expected_root: &str,
         name: String,
+        asset_ids: Vec<String>,
     ) -> Result<ManagementSnapshot, String> {
         self.check_expected_root(expected_root)?;
         let name = name.trim().to_string();
@@ -453,7 +454,24 @@ impl Library {
         }
         let mut m = self.get_management()?;
         if m.collections.iter().any(|c| c == &name) {
-            return Ok(m);
+            return Err(format!("合集“{name}”已存在。"));
+        }
+        if asset_ids.len() > 2000 {
+            return Err("一次最多加入 2000 个素材".into());
+        }
+        let mut seen = HashSet::new();
+        for id in asset_ids {
+            if !hash_valid(&id) || !seen.insert(id.clone()) {
+                return Err("素材标识无效".into());
+            }
+            self.asset_path(&id)?;
+            if m.trash.contains_key(&id) {
+                return Err("回收站中的素材不能加入合集".into());
+            }
+            let meta = m.metadata.entry(id).or_default();
+            if !meta.collections.contains(&name) {
+                meta.collections.push(name.clone());
+            }
         }
         m.collections.push(name);
         self.write_management(&m)?;
@@ -788,6 +806,51 @@ mod tests {
         )
         .unwrap();
     }
+    #[test]
+    fn create_collection_and_members_commit_together() {
+        let (_dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        let updated = lib.add_collection_name(&root, "新合集".into(), ids.clone()).unwrap();
+        assert_eq!(updated.collections, vec!["新合集"]);
+        for id in &ids { assert_eq!(updated.metadata[id].collections, vec!["新合集"]); }
+        assert!(lib.add_collection_name(&root, "新合集".into(), vec![]).is_err());
+        let before = fs::read(lib.management_path()).unwrap();
+        assert!(lib.add_collection_name(&root, "不能部分保存".into(), vec![ids[0].clone(), "f".repeat(64)]).is_err());
+        assert_eq!(before, fs::read(lib.management_path()).unwrap());
+        lib.set_trash(&root, vec![ids[0].clone()], true).unwrap();
+        let before = fs::read(lib.management_path()).unwrap();
+        assert!(lib.add_collection_name(&root, "回收站".into(), vec![ids[0].clone()]).is_err());
+        assert_eq!(before, fs::read(lib.management_path()).unwrap());
+    }
+
+    #[test]
+    fn create_collection_label_limit_keeps_original_management() {
+        let (_dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        let labels = (0..50).map(|i| format!("合集{i}")).collect();
+        lib.save_metadata(&root, ids[0].clone(), String::new(), vec![], labels).unwrap();
+        let before = fs::read(lib.management_path()).unwrap();
+        assert!(lib.add_collection_name(&root, "超过单项限额".into(), ids).is_err());
+        assert_eq!(before, fs::read(lib.management_path()).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_collection_disk_write_failure_keeps_original_management() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        lib.add_collection_name(&root, "已有合集".into(), vec![]).unwrap();
+        let before = fs::read(lib.management_path()).unwrap();
+        let previous_mode = fs::metadata(&root).unwrap().permissions().mode();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = lib.add_collection_name(&root, "写入失败".into(), ids);
+        fs::set_permissions(&root, fs::Permissions::from_mode(previous_mode)).unwrap();
+        assert!(result.is_err());
+        assert_eq!(before, fs::read(lib.management_path()).unwrap());
+        assert_eq!(lib.get_management().unwrap().collections, vec!["已有合集"]);
+    }
+
     #[test]
     fn annotations_do_not_change_assets_or_manifest() {
         let (_dir, lib, ids) = fixture();

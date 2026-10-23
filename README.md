@@ -30,7 +30,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin import-local -- \
 
 ## 开发
 
-需要 Node.js、Rust 和 macOS Command Line Tools。
+需要 Node.js 24.22.1、Rust 和 macOS Command Line Tools。桌面采集运行时还需 uv 已准备的可搬移 CPython 3.11 与 Pillow 13.0.0（`uv run --python 3.11 --with pillow==13.0.0 python -c "import PIL"`），或通过 `STICKERNEST_PYTHON` 指定同等环境。构建从本地准备并内置运行时，安装后的应用无需额外安装 Node.js/Python。
 
 ```sh
 npm ci

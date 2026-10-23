@@ -35,8 +35,8 @@ export async function saveMetadata(expectedRoot: string, assetId: string, metada
   return invoke('save_metadata', { expectedRoot, assetId, ...metadata });
 }
 
-export async function addCollection(expectedRoot: string, name: string): Promise<import('./types').ManagementSnapshot> {
-  return invoke('add_collection', { expectedRoot, name });
+export async function addCollection(expectedRoot: string, name: string, assetIds: string[]): Promise<import('./types').ManagementSnapshot> {
+  return invoke('add_collection', { expectedRoot, name, assetIds });
 }
 
 export async function setTrash(expectedRoot: string, assetIds: string[], trashed: boolean): Promise<import('./types').ManagementSnapshot> {
