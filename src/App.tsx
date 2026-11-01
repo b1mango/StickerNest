@@ -1,794 +1,578 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, ArchiveRestore, ArrowDownToLine, Check, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Folder, FolderOpen, FolderPlus, GalleryHorizontal, Grid3X3, HardDriveDownload, Images, LayoutGrid, List, LoaderCircle, MessageCircle, Music2, ScanSearch, Search, Trash2, X } from 'lucide-react';
-import { chooseLibrary, currentLibrary, imageUrl, importImages, isDesktop, getManagement, saveMetadata, setTrash, backupLibrary, restoreBackup, openLibraryPath, scanDuplicates, disbandGroup, ignorePair, exportAssets, saveGroupMetadata, batchRename, batchLabels, addCollection } from './api';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { SOURCE_LABELS, formatBytes, type ExportSummary, type ImportReport, type ScanReport, type Snapshot, type Sticker, type ManagementSnapshot, type AssetMetadata } from './types';
-import { StickerDetail } from './components/StickerDetail';
-import { StickerPreview } from './components/StickerPreview';
-import { SimilarReview } from './components/SimilarReview';
-import { BatchPanel } from './components/BatchPanel';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
+import { Clock, FolderOpen, Images, Inbox, Library, MessageCircle, Music2, SearchX, Star, Trash2 } from 'lucide-react';
+import * as api from './api';
 import { ContextMenu, type ContextMenuItem } from './components/ContextMenu';
 import { CollectDialog } from './components/CollectDialog';
+import { EmptyState, Welcome } from './components/EmptyState';
+import { Inspector, type InspectorActions } from './components/Inspector';
+import { BatchRenameDialog, ConfirmDialog, PromptDialog } from './components/Modal';
+import { QuickLook } from './components/QuickLook';
+import { SelectionBar } from './components/SelectionBar';
+import { Sidebar } from './components/Sidebar';
+import { SimilarReview } from './components/SimilarReview';
+import { StickerGrid } from './components/StickerGrid';
+import { Toasts } from './components/Toasts';
+import { Toolbar } from './components/Toolbar';
 import { WeChatImportDialog } from './components/WeChatImportDialog';
-import './styles.css';
+import { errorText, useLibrary } from './hooks/useLibrary';
+import { usePrefs } from './hooks/usePrefs';
+import { useToasts } from './hooks/useToasts';
+import { validateCollectionName } from './lib/collections';
+import { baseName, buildIndex, filterItems, sameNav, SORT_LABELS, type Nav, type SortKey } from './lib/derive';
+import { pruneReviewed, withoutPair } from './lib/scan';
+import { emptySelection, inOrder, moveSelect, shouldHandleGlobalKey, type Selection } from './lib/selection';
+import type { ScanReport } from './types';
 
-const PAGE_SIZES = [50, 100, 200];
-const PAGE_SIZE_KEY = 'stickernest.pageSize';
-const VIEW_KEY = 'stickernest.view';
-type ViewMode = 'large' | 'small' | 'list' | 'gallery';
-const VIEW_MODES: { id: ViewMode; label: string; icon: typeof LayoutGrid }[] = [
-  { id: 'large', label: '大图标', icon: LayoutGrid },
-  { id: 'small', label: '小图标', icon: Grid3X3 },
-  { id: 'list', label: '列表', icon: List },
-  { id: 'gallery', label: '画廊', icon: GalleryHorizontal },
-];
-const navigation = [
-  { id: 'all', label: '全部表情', icon: Images },
-  { id: '微信', label: '微信', icon: MessageCircle },
-  { id: '抖音', label: '抖音', icon: Music2 },
-  { id: '本地', label: '本地文件', icon: Folder },
-];
+type Dialog =
+  | { kind: 'new-collection'; ids: string[] }
+  | { kind: 'rename-collection'; name: string }
+  | { kind: 'delete-collection'; name: string }
+  | { kind: 'delete-forever'; ids: string[] | 'all' }
+  | { kind: 'batch-rename'; ids: string[] }
+  | { kind: 'collect-douyin' }
+  | { kind: 'import-wechat' };
 
-/** Unnamed hash-like file names shorten in the grid; full text stays in tooltip and detail. */
-export function shortDisplayName(name: string): string {
-  return /^[0-9a-f]{32,}\.[a-z0-9]+$/i.test(name) ? `${name.slice(0, 8)}…${name.slice(-7)}` : name;
+interface Menu { x: number; y: number; items: ContextMenuItem[]; above?: boolean }
+
+
+function navTitle(nav: Nav): string {
+  switch (nav.kind) {
+    case 'all': return '全部表情';
+    case 'favorites': return '收藏';
+    case 'recent': return '最近使用';
+    case 'source': return nav.value === '本地' ? '本地导入' : nav.value;
+    case 'collection': return nav.value;
+    case 'similar': return '相似项';
+    case 'trash': return '回收站';
+  }
 }
 
-function GroupMetaEditor({ group, disabled, onSave }: {
-  group: { id: string; tags: string[]; collections: string[] };
-  disabled: boolean;
-  onSave: (groupId: string, tags: string[], collections: string[]) => Promise<void>;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [tags, setTags] = useState('');
-  const [collections, setCollections] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-  const savingRef = useRef(false);
-  function startEditing() {
-    setTags(group.tags.join('，')); setCollections(group.collections.join('，')); setError(''); setEditing(true);
-  }
-  async function save() {
-    if (savingRef.current || disabled) return;
-    savingRef.current = true; setSaving(true); setError('');
-    const split = (value: string) => [...new Set(value.split(/[,，]/).map(value => value.trim()).filter(Boolean))];
-    try { await onSave(group.id, split(tags), split(collections)); setEditing(false); }
-    catch (reason) { setError(String(reason)); }
-    finally { savingRef.current = false; setSaving(false); }
-  }
-  return <div className="group-meta">
-    {editing ? <form className="group-meta-editor" onSubmit={event => { event.preventDefault(); void save(); }}>
-      <label className="field-label">组标签<input value={tags} disabled={saving} onChange={event => setTags(event.target.value)} /></label>
-      <label className="field-label">组合集<input value={collections} disabled={saving} onChange={event => setCollections(event.target.value)} /></label>
-      {error ? <p className="field-error" role="alert">{error}</p> : null}
-      <div className="editor-actions"><button className="button primary" type="submit" disabled={saving}>{saving ? '正在保存…' : '保存'}</button><button className="button secondary" type="button" disabled={saving} onClick={() => setEditing(false)}>取消</button></div>
-    </form> : <div className="group-meta-row">
-      <span className="group-meta-labels">组标签：{group.tags.join('、') || '未设置'} · 组合集：{group.collections.join('、') || '未设置'}</span>
-      <button className="group-expand-btn" type="button" disabled={disabled} onClick={startEditing}>编辑</button>
-    </div>}
-  </div>;
+function libraryName(root: string): string {
+  return root.split('/').filter(Boolean).pop() ?? root;
+}
+
+/** Menus that open from a button sit below it; ones near the bottom open upward (their bottom edge at `y`). */
+function menuAt(anchor: DOMRect, items: ContextMenuItem[], above = false): Menu {
+  return { x: anchor.left, y: above ? anchor.top - 4 : anchor.bottom + 4, items, above };
 }
 
 export default function App() {
-  const [library, setLibrary] = useState<Snapshot | null>(null);
-  const [management, setManagement] = useState<ManagementSnapshot | null>(null);
-  const [managementError, setManagementError] = useState('');
-  const [tag, setTag] = useState('');
-  const [collection, setCollection] = useState('');
-  const [source, setSource] = useState('all');
-
+  const toast = useToasts();
+  const lib = useLibrary(toast);
+  const [prefs, setPrefs] = usePrefs();
+  const [nav, setNav] = useState<Nav>({ kind: 'all' });
   const [query, setQuery] = useState('');
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(() => {
-    const saved = Number(localStorage.getItem(PAGE_SIZE_KEY));
-    return PAGE_SIZES.includes(saved) ? saved : 50;
-  });
-  const [view, setView] = useState<ViewMode>(() => {
-    const saved = localStorage.getItem(VIEW_KEY);
-    return VIEW_MODES.some(mode => mode.id === saved) ? (saved as ViewMode) : 'large';
-  });
-  const [busy, setBusy] = useState(isDesktop ? '正在读取资料库' : '');
-  const [error, setError] = useState('');
-  const [previewWarning, setPreviewWarning] = useState('');
-  const [report, setReport] = useState<ImportReport | null>(null);
-  const [backupNotice, setBackupNotice] = useState<{ text: string; path: string } | null>(null);
-  const [exportNotice, setExportNotice] = useState<ExportSummary | null>(null);
+  const [selection, setSelection] = useState<Selection>(emptySelection);
+  const [columns, setColumns] = useState(1);
+  const [menu, setMenu] = useState<Menu | null>(null);
+  const [dialog, setDialog] = useState<Dialog | null>(null);
+  const [quickLook, setQuickLook] = useState('');
   const [scanReport, setScanReport] = useState<ScanReport | null>(null);
-  const [selected, setSelected] = useState<Sticker | null>(null);
-  const [selectedEdit, setSelectedEdit] = useState(false);
-  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
-  const [showBatch, setShowBatch] = useState(false);
-  const [showNewCollection, setShowNewCollection] = useState(false);
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; item: Sticker | null } | null>(null);
-  const [showCollect, setShowCollect] = useState(false);
-  const [showMenu, setShowMenu] = useState(false);
-  const [showWechat, setShowWechat] = useState(false);
-  const [focusId, setFocusId] = useState('');
-  const [marqueeRect, setMarqueeRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
-  const locked = useRef(false);
+  const [scanning, setScanning] = useState(false);
+  const [dropCount, setDropCount] = useState(0);
+  const [dropTarget, setDropTarget] = useState('');
+  const [focusToken, setFocusToken] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
-  const anchorId = useRef('');
-  const marqueeState = useRef<{ x0: number; y0: number; base: Set<string>; active: boolean } | null>(null);
-  const showMenuRef = useRef(showMenu);
-  showMenuRef.current = showMenu;
-  const ctxMenuRef = useRef(ctxMenu);
-  ctxMenuRef.current = ctxMenu;
-  const viewRef = useRef(view);
-  viewRef.current = view;
-  const focusIdRef = useRef(focusId);
-  focusIdRef.current = focusId;
-  const visibleRef = useRef<Sticker[]>([]);
+  /** Ids being dragged out of the grid; drops of our own drag never import. */
+  const ownDrag = useRef<string[] | null>(null);
 
+  const { library, management } = lib;
+  const root = library?.root ?? '';
+  const index = useMemo(() => buildIndex(library, management), [library, management]);
+  const items = useMemo(() => filterItems(index, nav, query, prefs.sort), [index, nav, query, prefs.sort]);
+  const order = useMemo(() => items.map(item => item.id), [items]);
+  const selectedIds = useMemo(() => inOrder(selection.ids, order), [selection, order]);
+  const inTrash = nav.kind === 'trash';
+
+  // Items that leave the view (trashed, filtered out, deleted) leave the selection too.
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
-      const target = event.target as HTMLElement | null;
-      if (document.querySelector('dialog[open]') || target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]')) return;
-      if (event.key === 'Escape') {
-        if (event.defaultPrevented || document.querySelector('dialog[open]')) return;
-        if (showMenuRef.current) { setShowMenu(false); return; }
-        if (ctxMenuRef.current) return; // 右键菜单自己的 Esc 处理（也会 preventDefault）
-        setCheckedIds(current => current.size ? new Set() : current);
-        return;
-      }
-      // 画廊模式：方向键移动聚焦的表情，缩略条随之滚动
-      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-        if (viewRef.current !== 'gallery' || document.querySelector('dialog[open]')) return;
-        const target = event.target as HTMLElement | null;
-        if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return;
-        event.preventDefault();
-        const list = visibleRef.current;
-        if (!list.length) return;
-        const index = Math.max(0, list.findIndex(item => item.id === focusIdRef.current));
-        const next = list[Math.min(list.length - 1, Math.max(0, index + (event.key === 'ArrowRight' ? 1 : -1)))];
-        setFocusId(next.id);
-        return;
-      }
-      const mod = event.metaKey || event.ctrlKey;
-      if (!mod) return;
-      if (event.key.toLowerCase() === 'f') { event.preventDefault(); searchRef.current?.focus(); searchRef.current?.select(); }
-      if (event.key.toLowerCase() === 'a' && inSelectable(sourceRef.current) && filteredRef.current.length) {
-        event.preventDefault();
-        setCheckedIds(new Set(filteredRef.current.map(item => item.id)));
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    setSelection(current => {
+      if (![...current.ids].some(id => !order.includes(id))) return current;
+      const ids = new Set([...current.ids].filter(id => order.includes(id)));
+      return { ids, anchor: ids.has(current.anchor) ? current.anchor : '' };
+    });
+  }, [order]);
+
+  const navigate = useCallback((next: Nav) => {
+    setNav(next);
+    setSelection(emptySelection());
+    setQuickLook('');
   }, []);
-  const filteredRef = useRef<Sticker[]>([]);
-  const sourceRef = useRef(source);
-  sourceRef.current = source;
-  function inSelectable(value: string) { return value !== 'trash' && value !== 'similar'; }
 
-  // 点击导入拆分按钮以外的地方时收起下拉
+  // ---- Actions (all take explicit ids so menus, bar, inspector and keys share them) ----
+
+  const nameMap = (ids: string[]) => Object.fromEntries(ids.map(id => [id, baseName(index.byId.get(id)?.name ?? id)]));
+
+  const act = {
+    copy: (ids: string[]) => { if (ids.length) void lib.copy(ids); },
+    favorite: (ids: string[], on: boolean) => { if (ids.length) void lib.setFavorite(ids, on); },
+    reveal: (ids: string[]) => lib.reveal(ids),
+    exportIds: (ids: string[]) => { if (ids.length) void lib.exportIds(ids, nameMap(ids)); },
+    trash: (ids: string[]) => { if (ids.length) void lib.trash(ids); },
+    restore: (ids: string[]) => { if (ids.length) void lib.restore(ids); },
+    deleteForever: (ids: string[] | 'all') => setDialog({ kind: 'delete-forever', ids }),
+    addTo: (ids: string[], name: string) => { if (ids.length) void lib.addToCollection(ids, name); },
+    leave: (ids: string[], name: string) => {
+      const groupIds = ids.map(id => index.groupByMain.get(id)).filter(group => group?.collections.includes(name)).map(group => group!.id);
+      void lib.removeFromCollection(ids, name, groupIds);
+    },
+    newCollection: (ids: string[]) => setDialog({ kind: 'new-collection', ids }),
+    quickLook: (id: string) => setQuickLook(id),
+    rename: (ids: string[]) => {
+      if (ids.length > 1) { setDialog({ kind: 'batch-rename', ids }); return; }
+      setPrefs({ inspector: true });
+      setFocusToken(token => token + 1);
+    },
+  };
+
+  /** Saves through the write lock; failures toast and rethrow so inline editors can roll back. */
+  async function saveMeta(id: string, patch: { name?: string; tags?: string[] }) {
+    const current = management?.metadata[id] ?? { name: '', tags: [], collections: [] };
+    try {
+      lib.setManagement(await lib.write(rootPath => api.saveMetadata(rootPath, id, { ...current, ...patch })));
+    } catch (reason) {
+      toast.push({ kind: 'error', title: '保存失败', detail: errorText(reason) });
+      throw reason;
+    }
+  }
+
+  function collectionItems(ids: string[]): ContextMenuItem[] {
+    const current = nav.kind === 'collection' ? nav.value : '';
+    return [
+      ...index.collections.filter(([name]) => name !== current).map(([name]) => ({ key: `c:${name}`, label: name, onSelect: () => act.addTo(ids, name) })),
+      ...(index.collections.length > (current ? 1 : 0) ? [{ key: 'sep-new', label: '' }] : []),
+      { key: 'new', label: '新建合集…', onSelect: () => act.newCollection(ids) },
+    ];
+  }
+
+  function itemMenu(ids: string[]): ContextMenuItem[] {
+    if (inTrash) {
+      return [
+        { key: 'restore', label: ids.length > 1 ? `恢复 ${ids.length} 项` : '恢复', onSelect: () => act.restore(ids) },
+        { key: 'look', label: '快速查看', hint: '空格', disabled: ids.length !== 1, onSelect: () => act.quickLook(ids[0]) },
+        { key: 'sep1', label: '' },
+        { key: 'delete', label: '彻底删除…', danger: true, onSelect: () => act.deleteForever(ids) },
+      ];
+    }
+    const allFavorite = ids.every(id => index.favorites[id]);
+    const group = ids.length === 1 ? index.groupByMain.get(ids[0]) : undefined;
+    return [
+      { key: 'copy', label: ids.length > 1 ? `复制 ${ids.length} 个表情` : '复制', hint: '⌘C', onSelect: () => act.copy(ids) },
+      { key: 'look', label: '快速查看', hint: '空格', disabled: ids.length !== 1, onSelect: () => act.quickLook(ids[0]) },
+      { key: 'sep1', label: '' },
+      { key: 'fav', label: allFavorite ? '取消收藏' : '收藏', onSelect: () => act.favorite(ids, !allFavorite) },
+      { key: 'collect', label: '加入合集', children: collectionItems(ids) },
+      ...(nav.kind === 'collection' ? [{ key: 'leave', label: `从「${nav.value}」移出`, onSelect: () => act.leave(ids, nav.value) }] : []),
+      { key: 'sep2', label: '' },
+      { key: 'rename', label: ids.length > 1 ? '批量重命名…' : '重命名', hint: ids.length > 1 ? undefined : '↩', onSelect: () => act.rename(ids) },
+      { key: 'reveal', label: '在访达中显示', onSelect: () => act.reveal(ids) },
+      { key: 'export', label: '导出原图…', onSelect: () => act.exportIds(ids) },
+      ...(group ? [{ key: 'disband', label: '拆分版本分组', onSelect: () => void lib.disband(group.id) }] : []),
+      { key: 'sep3', label: '' },
+      { key: 'trash', label: '移入回收站', hint: '⌘⌫', danger: true, onSelect: () => act.trash(ids) },
+    ];
+  }
+
+  const importItems: ContextMenuItem[] = [
+    { key: 'files', label: '本地图片…', onSelect: () => void lib.importPick(false) },
+    { key: 'folder', label: '文件夹…', onSelect: () => void lib.importPick(true) },
+    { key: 'sep', label: '' },
+    { key: 'wechat', label: '从微信导入…', onSelect: () => setDialog({ kind: 'import-wechat' }) },
+    { key: 'douyin', label: '从抖音导入…', onSelect: () => setDialog({ kind: 'collect-douyin' }) },
+  ];
+
+  function openGridMenu(id: string | null, event: React.MouseEvent) {
+    if (!id) {
+      if (inTrash) return;
+      setMenu({ x: event.clientX, y: event.clientY, items: [
+        ...importItems,
+        { key: 'sep-all', label: '' },
+        { key: 'all', label: '全选', hint: '⌘A', disabled: !order.length, onSelect: () => setSelection({ ids: new Set(order), anchor: order[order.length - 1] ?? '' }) },
+      ] });
+      return;
+    }
+    // Right-clicking outside the selection retargets it, as in Finder.
+    let ids = selectedIds;
+    if (!selection.ids.has(id)) { ids = [id]; setSelection({ ids: new Set([id]), anchor: id }); }
+    setMenu({ x: event.clientX, y: event.clientY, items: itemMenu(ids) });
+  }
+
+  function openCollectionMenu(name: string, event: React.MouseEvent) {
+    event.preventDefault();
+    setMenu({ x: event.clientX, y: event.clientY, items: [
+      { key: 'rename', label: '重命名…', onSelect: () => setDialog({ kind: 'rename-collection', name }) },
+      { key: 'sep', label: '' },
+      { key: 'delete', label: '删除合集…', danger: true, onSelect: () => setDialog({ kind: 'delete-collection', name }) },
+    ] });
+  }
+
+  function openLibraryMenu(anchor: DOMRect) {
+    const items: ContextMenuItem[] = [
+      { key: 'reveal', label: '在访达中显示资料库', onSelect: () => lib.reveal([]) },
+      { key: 'sep1', label: '' },
+      { key: 'open', label: '打开其他资料库…', onSelect: () => void lib.openLibrary(false).then(ok => ok && navigate({ kind: 'all' })) },
+      { key: 'create', label: '新建资料库…', onSelect: () => void lib.openLibrary(true).then(ok => ok && navigate({ kind: 'all' })) },
+      { key: 'sep2', label: '' },
+      { key: 'backup', label: '备份资料库…', onSelect: () => void lib.backup() },
+      { key: 'restore', label: '从备份恢复…', onSelect: () => void lib.restoreBackup().then(ok => ok && navigate({ kind: 'all' })) },
+    ];
+    setMenu(menuAt(anchor, items, true));
+  }
+
+  function openSortMenu(anchor: DOMRect) {
+    setMenu(menuAt(anchor, (Object.keys(SORT_LABELS) as SortKey[]).map(key => ({
+      key, label: SORT_LABELS[key], checked: prefs.sort === key, onSelect: () => setPrefs({ sort: key }),
+    }))));
+  }
+
+  // ---- Similar review ----
+
+  async function runScan() {
+    setScanning(true);
+    await lib.run('正在扫描相似项', async () => { setScanReport(await api.scanDuplicates()); }, '扫描未完成');
+    setScanning(false);
+  }
+
+  // ---- Drag out, drop in ----
+
+  async function dragOut(ids: string[]) {
+    if (!root || inTrash) return;
+    ownDrag.current = ids;
+    try {
+      const dropped = await api.dragOut(root, ids);
+      // A drop on our own sidebar is an internal move, not a use.
+      if (dropped && ownDrag.current) void api.markUsed(root, ids).then(lib.setManagement).catch(() => undefined);
+    } catch (reason) {
+      toast.push({ kind: 'error', title: '无法拖出', detail: errorText(reason) });
+    } finally {
+      // The webview's own drop event can trail the drag callback; give it a beat.
+      window.setTimeout(() => { ownDrag.current = null; setDropTarget(''); }, 250);
+    }
+  }
+
+  const dropHandlers = useRef({ importPaths: lib.importPaths, addTo: act.addTo, hasLibrary: !!library });
+  dropHandlers.current = { importPaths: lib.importPaths, addTo: act.addTo, hasLibrary: !!library };
+
   useEffect(() => {
-    if (!showMenu) return;
-    const onDown = (event: MouseEvent) => {
-      if (!(event.target as HTMLElement).closest('.import-split')) setShowMenu(false);
+    if (!api.isDesktop) return;
+    const collectionAt = (position: { x: number; y: number }) => {
+      const scale = window.devicePixelRatio || 1;
+      const element = document.elementFromPoint(position.x / scale, position.y / scale);
+      return element?.closest<HTMLElement>('[data-collection-drop]')?.dataset.collectionDrop ?? '';
     };
-    document.addEventListener('mousedown', onDown, true);
-    return () => document.removeEventListener('mousedown', onDown, true);
-  }, [showMenu]);
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void getCurrentWebview().onDragDropEvent(event => {
+      const payload = event.payload;
+      const dragged = ownDrag.current;
+      if (dragged) {
+        if (payload.type === 'enter' || payload.type === 'over') setDropTarget(collectionAt(payload.position));
+        else if (payload.type === 'drop') {
+          const name = collectionAt(payload.position);
+          ownDrag.current = null;
+          if (name) dropHandlers.current.addTo(dragged, name);
+          setDropTarget('');
+        } else setDropTarget('');
+        return;
+      }
+      if (!dropHandlers.current.hasLibrary) return;
+      if (payload.type === 'enter') setDropCount(payload.paths.length);
+      else if (payload.type === 'drop') { setDropCount(0); if (payload.paths.length) void dropHandlers.current.importPaths(payload.paths); }
+      else if (payload.type === 'leave') setDropCount(0);
+    }).then(fn => { if (disposed) fn(); else unlisten = fn; });
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
 
-  // One handler owns native dragging and double-click zoom, including brand children.
+  // One handler owns native window dragging and double-click zoom.
   useEffect(() => {
-    if (!isDesktop) return;
+    if (!api.isDesktop) return;
     const onMouseDown = (event: MouseEvent) => {
       if (event.button !== 0 || !(event.target instanceof Element)) return;
       const target = event.target;
       if (!target.closest('[data-window-drag-region]')) return;
-      if (target.closest('button, input, select, textarea, a, [role="checkbox"], [role="menu"], .library-menu')) return;
+      if (target.closest('button, input, select, textarea, a, [role="menu"]')) return;
       event.preventDefault();
       const window = getCurrentWindow();
-      const operation = event.detail === 2 ? window.toggleMaximize() : window.startDragging();
-      void operation.catch(reason => setError(`窗口操作失败：${String(reason)}`));
+      void (event.detail === 2 ? window.toggleMaximize() : window.startDragging()).catch(() => undefined);
     };
     window.addEventListener('mousedown', onMouseDown);
     return () => window.removeEventListener('mousedown', onMouseDown);
   }, []);
 
-  // 画廊模式下让聚焦的缩略图始终滚进视野；只动缩略条自身，绝不滚动页面（否则导航按钮会跳动）
-  const stripRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (view !== 'gallery' || !focusId) return;
-    const strip = stripRef.current;
-    const thumb = strip?.querySelector('.gallery-thumb-btn.focused') as HTMLElement | null;
-    if (!strip || !thumb) return;
-    const stripBox = strip.getBoundingClientRect();
-    const thumbBox = thumb.getBoundingClientRect();
-    strip.scrollTo({ left: strip.scrollLeft + (thumbBox.left - stripBox.left) - (strip.clientWidth - thumbBox.width) / 2, behavior: 'smooth' });
-  }, [focusId, view]);
+  // ---- Keyboard ----
 
-  useEffect(() => { localStorage.setItem(VIEW_KEY, view); }, [view]);
-  useEffect(() => { localStorage.setItem(PAGE_SIZE_KEY, String(pageSize)); }, [pageSize]);
+  const keyState = useRef({ selection, selectedIds, order, columns, inTrash, nav, menu, view: prefs.view, act });
+  keyState.current = { selection, selectedIds, order, columns, inTrash, nav, menu, view: prefs.view, act };
 
   useEffect(() => {
-    if (!isDesktop) return;
-    let active = true;
-    currentLibrary().then(async snapshot => {
-      if (!active) return;
-      setLibrary(snapshot);
-      if (snapshot) {
-        try { const value = await getManagement(); if (active) setManagement(value); }
-        catch (reason) { if (active) setManagementError(String(reason)); }
-      }
-    })
-      .catch(reason => { if (active) setError(String(reason)); })
-      .finally(() => { if (active) setBusy(''); });
-    return () => { active = false; };
-  }, []);
+    const onKey = (event: KeyboardEvent) => {
+      if (!shouldHandleGlobalKey(event, !!document.querySelector('dialog[open]'))) return;
+      const state = keyState.current;
+      if (state.menu) return;
+      const meta = event.metaKey || event.ctrlKey;
+      const key = event.key.toLowerCase();
+      const ids = state.selectedIds;
+      const browsing = state.nav.kind !== 'similar';
 
-  async function run(label: string, action: () => Promise<void>) {
-    if (locked.current || busy || !isDesktop) return;
-    locked.current = true;
-    setBusy(label);
-    setError('');
-    setPreviewWarning('');
-    try { await action(); }
-    catch (reason) { setError(String(reason)); }
-    finally { locked.current = false; setBusy(''); }
-  }
-
-  async function applyLibrary(snapshot: Snapshot) {
-    setLibrary(snapshot); setManagement(null); setManagementError(''); setTag(''); setCollection(''); setReport(null); setSelected(null); setQuery(''); setSource('all'); setPage(1); setBackupNotice(null); setExportNotice(null); setScanReport(null); setCheckedIds(new Set()); setExpandedGroups(new Set()); setShowBatch(false); setFocusId(''); setMarqueeRect(null);
-    anchorId.current = '';
-    try { setManagement(await getManagement()); } catch (reason) { setManagementError(String(reason)); }
-  }
-
-  function openLibrary() {
-    void run('正在打开资料库', async () => {
-      const snapshot = await chooseLibrary(false);
-      if (snapshot) await applyLibrary(snapshot);
-    });
-  }
-
-  function backupCurrentLibrary() {
-    void run('正在备份资料库', async () => {
-      const result = await backupLibrary();
-      if (result) setBackupNotice({ text: `已备份 ${result.assetCount} 个素材（${formatBytes(result.totalBytes)}${result.includesManagement ? '，含整理记录' : ''}），哈希校验通过。`, path: result.path });
-    });
-  }
-
-  function restoreFromBackup() {
-    void run('正在校验并恢复备份', async () => {
-      const path = await restoreBackup();
-      if (path) {
-        await applyLibrary(await openLibraryPath(path));
-        setBackupNotice({ text: '已从备份恢复并在新位置打开，原备份保持不变。', path });
-      }
-    });
-  }
-
-  async function setItemsTrash(ids: string[], trashed: boolean) {
-    // Like editMetadata, the modal blocks library switching while this save is pending.
-    if (!library) throw new Error('请先打开资料库。');
-    setManagement(await setTrash(library.root, ids, trashed));
-    setSelected(null);
-  }
-
-  function runScan() {
-    void run('正在扫描相似项', async () => {
-      setScanReport(await scanDuplicates());
-    });
-  }
-
-  /** 保留/忽略后就把涉及的条目从报告里剔除，避免全量重扫。 */
-  function pruneReviewed(doneIds: string[]) {
-    const done = new Set(doneIds);
-    setScanReport(current => current ? {
-      ...current,
-      exactGroups: current.exactGroups.filter(group => !group.assetIds.some(id => done.has(id))),
-      similarPairs: current.similarPairs.filter(pair => !done.has(pair.baseId) && !done.has(pair.otherId)),
-      animationPairs: current.animationPairs.filter(pair => !done.has(pair.baseId) && !done.has(pair.otherId)),
-    } : current);
-  }
-
-  async function keepOneAsset(_keepId: string, removedIds: string[]) {
-    if (!library) throw new Error('请先打开资料库。');
-    // Others move to the recycle bin, recoverable any time from the trash view.
-    setManagement(await setTrash(library.root, removedIds, true));
-    setCheckedIds(current => new Set([...current].filter(id => !removedIds.includes(id))));
-    pruneReviewed(removedIds);
-  }
-
-  async function ignoreSimilarPair(a: string, b: string) {
-    if (!library) throw new Error('请先打开资料库。');
-    setManagement(await ignorePair(library.root, a, b));
-    const matches = (pair: { baseId: string; otherId: string }) =>
-      (pair.baseId === a && pair.otherId === b) || (pair.baseId === b && pair.otherId === a);
-    setScanReport(current => current ? {
-      ...current,
-      similarPairs: current.similarPairs.filter(pair => !matches(pair)),
-      animationPairs: current.animationPairs.filter(pair => !matches(pair)),
-    } : current);
-  }
-
-  function exportSelection() {
-    void run('正在导出素材', async () => {
-      if (!library || !checkedIds.size) return;
-      const ids = [...checkedIds];
-      // nameMap must carry bare display names only; the manifest name retains
-      // its original extension, which the Rust side strips when rebuilding.
-      const nameMap = Object.fromEntries(displayItems.filter(item => ids.includes(item.id)).map(item => [item.id, management?.metadata[item.id]?.name || item.name.replace(/\.[a-z0-9]+$/i, '')]));
-      const result = await exportAssets(library.root, ids, nameMap);
-      if (result) { setExportNotice(result); setCheckedIds(new Set()); }
-    });
-  }
-
-  function selectedInDisplayOrder(): string[] {
-    // Numbering follows the visible grid order, not the click order.
-    return displayItems.filter(item => checkedIds.has(item.id)).map(item => item.id);
-  }
-
-  async function batchRenameSelected(prefix: string, start: number) {
-    if (!library) throw new Error('请先打开资料库。');
-    await run('正在批量重命名', async () => {
-      setManagement(await batchRename(library.root, selectedInDisplayOrder(), prefix, start));
-      setShowBatch(false);
-    });
-  }
-
-  async function batchLabelsSelected(addTags: string[], removeTags: string[], addCollections: string[], removeCollections: string[]) {
-    if (!library) throw new Error('请先打开资料库。');
-    await run('正在批量整理', async () => {
-      setManagement(await batchLabels(library.root, selectedInDisplayOrder(), addTags, removeTags, addCollections, removeCollections));
-    });
-  }
-
-  async function trashSelected() {
-    if (!library) throw new Error('请先打开资料库。');
-    await run('正在移入回收站', async () => {
-      setManagement(await setTrash(library.root, [...checkedIds], true));
-      setCheckedIds(new Set());
-      setShowBatch(false);
-    });
-  }
-
-  async function disband(groupId: string) {
-    if (!library) return;
-    await run('正在拆分分组', async () => {
-      setManagement(await disbandGroup(library.root, groupId));
-    });
-  }
-
-  async function saveGroupMeta(groupId: string, tags: string[], collections: string[]) {
-    if (!library) throw new Error('请先打开资料库。');
-    setManagement(await saveGroupMetadata(library.root, groupId, tags, collections));
-  }
-
-  function importFiles() {
-    void run('正在导入，请稍候', async () => {
-      const result = await importImages('本地');
-      if (result) {
-        setLibrary(result.snapshot); setReport(result.report); setPage(1);
-        if (result.previewWarnings.length) setPreviewWarning(`导入结果已保存，部分素材无法预览：${result.previewWarnings.join('；')}`);
-      }
-    });
-  }
-
-  /** ids join a collection; `leave` removes the collection being viewed (a move). */
-  function labelCollection(ids: string[], name: string, leave: string) {
-    void run(leave ? '正在移动到合集' : '正在复制到合集', async () => {
-      if (!library) return;
-      setManagement(await batchLabels(library.root, ids, [], [], [name], leave ? [leave] : []));
-    });
-  }
-
-  function leaveCollection(ids: string[], name: string) {
-    void run('正在移出合集', async () => {
-      if (!library) return;
-      setManagement(await batchLabels(library.root, ids, [], [], [], [name]));
-    });
-  }
-
-  async function createCollection(name: string) {
-    if (!library) throw new Error('请先打开资料库。');
-    const existing = new Set([...(management?.collections ?? []), ...collectionEntries.map(([entry]) => entry)]);
-    if (existing.has(name)) throw new Error(`合集“${name}”已存在。`);
-    if (locked.current || busy || !isDesktop) throw new Error('资料库忙，请稍后重试。');
-    locked.current = true; setBusy('正在创建合集'); setError('');
-    try {
-      const next = await addCollection(library.root, name, selectedInDisplayOrder());
-      setManagement(next); setCheckedIds(new Set());
-      setCollection(name); setSource('all'); setPage(1); setShowNewCollection(false);
-    } finally { locked.current = false; setBusy(''); }
-  }
-
-  const trashSet = useMemo(() => new Set(Object.keys(management?.trash ?? {})), [management]);
-  const groupByMain = useMemo(() => new Map((management?.groups ?? []).map(group => [group.mainAssetId, group])), [management]);
-  const groupedNonMain = useMemo(() => new Set((management?.groups ?? []).flatMap(group => group.memberIds.filter(id => id !== group.mainAssetId))), [management]);
-  const counts = useMemo(() => {
-    const values: Record<string, number> = { all: 0, 本地: 0, 微信: 0, 抖音: 0, trash: 0 };
-    for (const item of library?.items ?? []) {
-      if (trashSet.has(item.id)) { values.trash += 1; continue; }
-      if (groupedNonMain.has(item.id)) continue;
-      values.all += 1;
-      for (const origin of item.sources) values[origin] = (values[origin] ?? 0) + 1;
-    }
-    return values;
-  }, [library, trashSet, groupedNonMain]);
-  const displayItems = useMemo(() => (library?.items ?? []).map(item => ({ ...item, name: management?.metadata[item.id]?.name || item.name })), [library, management]);
-  const tagFacets = useMemo(() => {
-    const tags = new Set<string>();
-    for (const value of Object.values(management?.metadata ?? {})) value.tags.forEach(value => tags.add(value));
-    for (const group of management?.groups ?? []) group.tags.forEach(value => tags.add(value));
-    return [...tags].sort();
-  }, [management]);
-  const collectionEntries = useMemo(() => {
-    const map = new Map<string, number>();
-    // Empty collections stay on the roster so they appear in the sidebar at 0.
-    for (const name of management?.collections ?? []) map.set(name, 0);
-    for (const item of library?.items ?? []) {
-      if (trashSet.has(item.id) || groupedNonMain.has(item.id)) continue;
-      for (const name of management?.metadata[item.id]?.collections ?? []) {
-        map.set(name, (map.get(name) ?? 0) + 1);
-      }
-    }
-    for (const group of management?.groups ?? []) {
-      for (const name of group.collections) map.set(name, (map.get(name) ?? 0) + 1);
-    }
-    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0], 'zh'));
-  }, [library, management, trashSet, groupedNonMain]);
-  const effectiveLabelsOf = useMemo(() => {
-    // Main versions answer for the group: member metadata plus group-level
-    // tags and collections, as the design requires (displayed as a union).
-    const map = new Map<string, { tags: string[]; collections: string[] }>();
-    for (const item of displayItems) {
-      const meta = management?.metadata[item.id];
-      const group = groupByMain.get(item.id);
-      map.set(item.id, {
-        tags: [...new Set([...(meta?.tags ?? []), ...(group?.tags ?? [])])],
-        collections: [...new Set([...(meta?.collections ?? []), ...(group?.collections ?? [])])],
-      });
-    }
-    return map;
-  }, [displayItems, management, groupByMain]);
-  const filtered = useMemo(() => {
-    const search = query.trim().toLocaleLowerCase();
-    return displayItems.filter(item => {
-      if (source === 'trash') {
-        if (!trashSet.has(item.id)) return false;
-      } else {
-        if (trashSet.has(item.id) || groupedNonMain.has(item.id)) return false;
-        if (source !== 'all' && !item.sources.includes(source)) return false;
-      }
-      const labels = effectiveLabelsOf.get(item.id) ?? { tags: [], collections: [] };
-      return (!tag || labels.tags.includes(tag)) && (!collection || labels.collections.includes(collection))
-        && (!search || [item.name, ...labels.tags].some(value => value.toLocaleLowerCase().includes(search)));
-    });
-  }, [displayItems, management, query, source, tag, collection, trashSet, groupedNonMain, effectiveLabelsOf]);
-  async function editMetadata(assetId: string, metadata: AssetMetadata) {
-    // The modal prevents switching libraries while its save is pending.
-    if (!library) throw new Error('请先打开资料库。');
-    setManagement(await saveMetadata(library.root, assetId, metadata));
-  }
-  filteredRef.current = filtered;
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const visiblePage = Math.min(page, totalPages);
-  const visible = filtered.slice((visiblePage - 1) * pageSize, visiblePage * pageSize);
-  visibleRef.current = visible;
-  const disabled = !!busy || !isDesktop;
-  const inSelectableView = inSelectable(source);
-  const inReviewView = source === 'similar';
-  const heading = collection || (source === 'trash' ? '回收站' : source === 'similar' ? '相似项对比' : (navigation.find(item => item.id === source)?.label ?? '全部表情'));
-  const headingCount = inReviewView ? null : collection ? filtered.length : (counts[source] ?? filtered.length);
-  const isFiltering = !!(query || tag || collection) || (source !== 'all' && source !== 'trash');
-  const inEmptyTrash = source === 'trash' && !isFiltering;
-  const inEmptyCollection = !!collection && !query && !tag;
-  const emptyTitle = inEmptyTrash ? '回收站是空的' : inEmptyCollection ? '这个合集还是空的' : isFiltering ? '没有匹配的表情' : '还没有表情';
-  const emptyHint = inEmptyTrash ? '移入回收站后随时可恢复，不会真正删除。'
-    : inEmptyCollection ? '勾选表情后，在右键菜单里选择「复制到合集」或「移动到合集」。'
-    : isFiltering ? '试试其他关键词或筛选。'
-    : '导入本地图片、GIF 或 WebP 开始整理你的表情画册。';
-
-  const focusIndex = Math.max(0, visible.findIndex(item => item.id === focusId));
-  const focusItem = visible[focusIndex] ?? visible[0];
-  function moveFocus(step: number) {
-    if (!visible.length) return;
-    const next = visible[Math.min(visible.length - 1, Math.max(0, focusIndex + step))];
-    setFocusId(next.id);
-  }
-
-  /** Finder-style click select: plain click toggles, Shift+click fills the range from the anchor. */
-  function handleSelect(item: Sticker, event: { shiftKey: boolean }) {
-    if (event.shiftKey && anchorId.current) {
-      const ids = filtered.map(entry => entry.id);
-      const from = ids.indexOf(anchorId.current);
-      const to = ids.indexOf(item.id);
-      if (from >= 0 && to >= 0) {
-        const [lo, hi] = from < to ? [from, to] : [to, from];
-        const range = ids.slice(lo, hi + 1);
-        setCheckedIds(current => new Set([...current, ...range]));
+      if (meta && key === 'f') { event.preventDefault(); searchRef.current?.focus(); searchRef.current?.select(); return; }
+      if (meta && key === 'i') { event.preventDefault(); setPrefs({ inspector: !prefsRef.current.inspector }); return; }
+      if (meta && (key === '1' || key === '2')) { event.preventDefault(); setPrefs({ view: key === '1' ? 'grid' : 'list' }); return; }
+      if (!browsing) return;
+      if (meta && key === 'a') { event.preventDefault(); setSelection({ ids: new Set(state.order), anchor: state.order[state.order.length - 1] ?? '' }); return; }
+      if (meta && key === 'c' && ids.length && !state.inTrash) { event.preventDefault(); state.act.copy(ids); return; }
+      if (meta && (key === 'backspace' || key === 'delete') && ids.length) {
+        event.preventDefault();
+        if (state.inTrash) state.act.deleteForever(ids); else state.act.trash(ids);
         return;
       }
-    }
-    setCheckedIds(current => { const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next; });
-    anchorId.current = item.id;
-  }
-
-  /** Rubber-band selection started on empty grid space; Shift keeps the existing selection. */
-  function startMarquee(event: React.MouseEvent) {
-    if (!inSelectableView || event.button !== 0) return;
-    const element = event.target as HTMLElement;
-    if (element.closest('[data-marquee-id], button, input, select, dialog, .group-row, .group-tray, .gallery-strip, .pagination')) return;
-    marqueeState.current = { x0: event.clientX, y0: event.clientY, base: event.shiftKey ? new Set(checkedIds) : new Set(), active: false };
-    const onMove = (move: MouseEvent) => {
-      const state = marqueeState.current;
-      if (!state) return;
-      const x1 = move.clientX;
-      const y1 = move.clientY;
-      if (!state.active && Math.abs(x1 - state.x0) < 5 && Math.abs(y1 - state.y0) < 5) return;
-      state.active = true;
-      const rect = { left: Math.min(state.x0, x1), top: Math.min(state.y0, y1), width: Math.abs(x1 - state.x0), height: Math.abs(y1 - state.y0) };
-      setMarqueeRect(rect);
-      const hits: string[] = [];
-      for (const node of document.querySelectorAll<HTMLElement>('[data-marquee-id]')) {
-        const box = node.getBoundingClientRect();
-        if (box.left < rect.left + rect.width && box.right > rect.left && box.top < rect.top + rect.height && box.bottom > rect.top) {
-          hits.push(node.dataset.marqueeId!);
-        }
+      if (meta || event.altKey) return;
+      if (key === 'escape' && ids.length) { event.preventDefault(); setSelection(emptySelection()); return; }
+      if (key === ' ' && ids.length) {
+        event.preventDefault();
+        state.act.quickLook(state.selection.ids.has(state.selection.anchor) ? state.selection.anchor : ids[0]);
+        return;
       }
-      setCheckedIds(new Set([...state.base, ...hits]));
+      if (key === 'enter' && ids.length && !state.inTrash) { event.preventDefault(); state.act.rename(ids); return; }
+      if (key.startsWith('arrow')) {
+        const columnsNow = state.view === 'grid' ? state.columns : 1;
+        if (state.view === 'list' && (key === 'arrowleft' || key === 'arrowright')) return;
+        const next = moveSelect(state.selection, state.order, columnsNow, event.key, event.shiftKey);
+        if (next) { event.preventDefault(); setSelection(next); }
+      }
     };
-    const onUp = () => {
-      const state = marqueeState.current;
-      marqueeState.current = null;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      setMarqueeRect(null);
-      // A plain click on empty space (no drag) clears the selection, like Finder.
-      if (state && !state.active) setCheckedIds(state.base);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [setPrefs]);
+  const prefsRef = useRef(prefs);
+  prefsRef.current = prefs;
+
+  // ---- Render ----
+
+  if (lib.loading) return <div className="app-loading" data-window-drag-region />;
+
+  if (!library) {
+    return <>
+      <Welcome busy={!!lib.busy} onCreate={() => void lib.openLibrary(true)} onOpen={() => void lib.openLibrary(false)} onRestore={() => void lib.restoreBackup()} />
+      <Toasts toasts={toast.toasts} onDismiss={toast.dismiss} />
+    </>;
   }
 
-  function openCardMenu(event: React.MouseEvent, item: Sticker | null) {
-    event.preventDefault();
-    if (!item && checkedIds.size === 0) return;
-    setCtxMenu({ x: event.clientX, y: event.clientY, item });
-    if (item && !checkedIds.has(item.id)) setCheckedIds(current => new Set([...current, item.id]));
-  }
+  const inspectorActions: InspectorActions = {
+    copy: act.copy,
+    favorite: act.favorite,
+    reveal: act.reveal,
+    more: (ids, anchor) => setMenu(menuAt(anchor, [
+      { key: 'export', label: '导出原图…', onSelect: () => act.exportIds(ids) },
+      { key: 'reveal', label: '在访达中显示', onSelect: () => act.reveal(ids) },
+      ...(ids.length > 1 ? [{ key: 'rename', label: '批量重命名…', onSelect: () => act.rename(ids) }] : []),
+      { key: 'sep', label: '' },
+      { key: 'trash', label: '移入回收站', danger: true, onSelect: () => act.trash(ids) },
+    ])),
+    trash: act.trash,
+    restore: act.restore,
+    deleteForever: act.deleteForever,
+    rename: (id, name) => saveMeta(id, { name }),
+    saveTags: (id, tags) => saveMeta(id, { tags }),
+    collectionPicker: (ids, anchor) => setMenu(menuAt(anchor, collectionItems(ids))),
+    leaveCollection: act.leave,
+    batchRename: ids => setDialog({ kind: 'batch-rename', ids }),
+    disband: groupId => void lib.disband(groupId),
+    openVersion: id => setQuickLook(id),
+  };
 
-  function contextMenuItems(): ContextMenuItem[] {
-    const target = ctxMenu?.item ?? null;
-    const targetId = target?.id ?? '';
-    const ids = selectedInDisplayOrder();
-    const multi = checkedIds.size > 1;
-    const collectionNames = collectionEntries.map(([name]) => name);
-    const items: ContextMenuItem[] = [];
-    if (target) items.push({ key: 'detail', label: '查看详情', onSelect: () => { setSelected(library!.items.find(original => original.id === targetId) ?? target); setSelectedEdit(false); } });
-    if (inSelectableView && ids.length) {
-      const openEdit = () => { setSelected(library!.items.find(original => original.id === targetId) ?? target!); setSelectedEdit(true); };
-      const copyChildren: ContextMenuItem[] = collectionNames.map(name => ({ key: `copy:${name}`, label: `复制到「${name}」`, onSelect: () => labelCollection(ids, name, '') }));
-      copyChildren.push({ key: 'sepcopy', label: '' }, { key: 'copy-new', label: '新建合集并加入…', onSelect: () => setShowNewCollection(true) });
-      items.push({ key: 'sep1', label: '' });
-      if (multi) {
-        // 多选：批量三件套放在同一段
-        items.push(
-          { key: 'rename', label: `批量重命名（${checkedIds.size} 项）`, onSelect: () => setShowBatch(true) },
-          { key: 'tags', label: `批量设置标签（${checkedIds.size} 项）`, onSelect: () => setShowBatch(true) },
-          { key: 'copy-col', label: '批量加入合集', children: copyChildren },
-        );
-      } else if (target) {
-        // 单选：重命名、标签、合集、导出放在同一段
-        items.push(
-          { key: 'rename-one', label: '重命名…', onSelect: openEdit },
-          { key: 'tags-one', label: '设置标签…', onSelect: openEdit },
-          { key: 'copy-col', label: collection ? '复制到合集' : '加入合集', children: copyChildren },
-        );
-      }
-      if (collection) {
-        const moveChildren: ContextMenuItem[] = collectionNames.filter(name => name !== collection).map(name => ({ key: `move:${name}`, label: `移动到「${name}」`, onSelect: () => labelCollection(ids, name, collection) }));
-        moveChildren.push({ key: 'sepmove', label: '' }, { key: 'move-new', label: '新建合集并移入…', onSelect: () => setShowNewCollection(true) });
-        items.push({ key: 'move-col', label: `移动到合集（移出「${collection}」）`, children: moveChildren });
-        items.push({ key: 'leave-col', label: `从「${collection}」移出（${ids.length} 项）`, onSelect: () => leaveCollection(ids, collection) });
-      }
-      items.push({ key: 'sep-col', label: '' });
-      items.push({ key: 'export', label: multi ? `导出所选（${checkedIds.size} 项）` : '导出', onSelect: exportSelection });
-      items.push({ key: 'sep2', label: '' });
-    }
-    if (multi || target) items.push({ key: 'trash', label: multi ? `移入回收站（${checkedIds.size} 项）` : '移入回收站', danger: true, onSelect: () => { const trashIds = multi ? ids : [targetId]; void setTrash(library!.root, trashIds, true).then(setManagement).catch(reason => setError(String(reason))); setCheckedIds(new Set()); } });
-    return items;
-  }
+  const title = navTitle(nav);
+  const mode = nav.kind === 'similar' ? 'similar' : inTrash ? 'trash' : 'browse';
+  const subtitle = mode === 'similar' ? '找出重复与相似的表情'
+    : query ? `找到 ${items.length} 个`
+    : inTrash ? (items.length ? `${items.length} 项 · 彻底删除后移到系统废纸篓` : '')
+    : `${items.length} 个表情`;
 
-  /** DOM 勾选框：打勾是真实 SVG（不依赖 CSS data-uri，WebKit 稳出）。 */
-  function selectBox(item: Sticker, isChecked: boolean) {
-    if (!inSelectableView) return null;
-    return <span className={`select-box${isChecked ? ' checked' : ''}`} role="checkbox" aria-checked={isChecked} aria-label={`选择 ${item.name}`} tabIndex={0}
-      onClick={event => { event.stopPropagation(); handleSelect(item, event); }}
-      onKeyDown={event => { if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); handleSelect(item, event); } }}>
-      {isChecked ? <Check size={14} strokeWidth={4} /> : null}
-    </span>;
-  }
-
-  function renderBadges(item: Sticker) {
-    const group = groupByMain.get(item.id);
-    if (!group) return null;
-    return <span className="group-badge" title={`版本分组 ${group.memberIds.length} 项`}><Images size={11} />{group.memberIds.length}</span>;
-  }
-
-  function renderGridCell(item: Sticker) {
-    const group = groupByMain.get(item.id);
-    const isChecked = checkedIds.has(item.id);
-    const memberItems = group ? group.memberIds.map(id => library!.items.find(original => original.id === id)).filter((value): value is Sticker => !!value) : [];
-    return <Fragment key={item.id}>
-      <div className="sticker-cell" data-marquee-id={item.id}>
-        {selectBox(item, isChecked)}
-        <button className={`sticker-card${isChecked ? ' checked' : ''}`} onClick={event => inSelectableView ? handleSelect(item, event) : setSelected(item)} onContextMenu={event => openCardMenu(event, item)} aria-label={`选择 ${item.name}`} aria-pressed={isChecked}>
-          <div className="sticker-image"><StickerPreview key={`${library!.root}/${item.fileName}`} src={imageUrl(library!.root, item.fileName)} name={item.name} />{renderBadges(item)}</div>
-          <div className="sticker-info"><strong title={item.name}>{shortDisplayName(item.name)}</strong><span>{item.sources.map(origin => SOURCE_LABELS[origin] ?? origin).join(' / ')}<span>{formatBytes(item.bytes)}</span></span></div>
-        </button>
-        {group ? <div className="group-tray"><button className="group-expand-btn" type="button" disabled={disabled} onClick={() => setExpandedGroups(current => { const next = new Set(current); if (next.has(group.id)) next.delete(group.id); else next.add(group.id); return next; })}>{expandedGroups.has(group.id) ? '收起版本' : `展开 ${group.memberIds.length} 个版本`}</button><button className="group-disband-btn" type="button" disabled={disabled} onClick={() => void disband(group.id)}>拆分分组</button>{group.tags.length || group.collections.length ? <span className="group-meta-inline" title={`组标签：${group.tags.join('、') || '无'} · 组合集：${group.collections.join('、') || '无'}`}>{group.tags.join('、')}{group.tags.length && group.collections.length ? ' · ' : ''}{group.collections.join('、')}</span> : null}</div> : null}
-      </div>
-      {group && expandedGroups.has(group.id) ? <div className="group-row"><div className="group-members">{memberItems.map(member => <button className="group-member" key={member.id} onClick={() => setSelected(member)} aria-label={`查看 ${member.name}`}><StickerPreview src={imageUrl(library!.root, member.fileName)} name={member.name} /><span className="pair-caption" title={member.name}>{shortDisplayName(member.name)}</span></button>)}</div><GroupMetaEditor group={group} disabled={disabled} onSave={saveGroupMeta} /></div> : null}
-    </Fragment>;
-  }
-
-  function renderListRow(item: Sticker) {
-    const group = groupByMain.get(item.id);
-    const isChecked = checkedIds.has(item.id);
-    return <div className="sticker-row" key={item.id} data-marquee-id={item.id}>
-      {inSelectableView ? selectBox(item, isChecked) : <span className="row-box" />}
-      <button className={`row-card${isChecked ? ' checked' : ''}`} onClick={event => inSelectableView ? handleSelect(item, event) : setSelected(item)} onContextMenu={event => openCardMenu(event, item)} aria-label={`选择 ${item.name}`} aria-pressed={isChecked}>
-        <span className="row-thumb"><StickerPreview src={imageUrl(library!.root, item.fileName)} name={item.name} /></span>
-        <span className="row-name"><strong title={item.name}>{shortDisplayName(item.name)}</strong><span>{item.sources.map(origin => SOURCE_LABELS[origin] ?? origin).join(' / ')}{group ? ` · 版本分组 ${group.memberIds.length} 项` : ''}</span></span>
-        <span className="row-cell">{item.format.toUpperCase()}</span>
-        <span className="row-cell">{item.width}×{item.height}</span>
-        <span className="row-cell">{formatBytes(item.bytes)}</span>
-        <span className="row-cell">{new Date(item.importedAt * 1000).toLocaleDateString('zh-CN')}</span>
-      </button>
-    </div>;
-  }
-
-  function renderGallery() {
-    return <section className="gallery-view" aria-label="表情列表" onMouseDown={startMarquee}>
-      {focusItem ? <div className="gallery-stage" tabIndex={0}>
-        <button className="icon-button gallery-nav prev" aria-label="上一个" disabled={focusIndex <= 0} onClick={() => moveFocus(-1)}><ChevronLeft size={22} /></button>
-        <StickerPreview src={imageUrl(library!.root, focusItem.fileName)} name={focusItem.name} eager />
-        <button className="icon-button gallery-nav next" aria-label="下一个" disabled={focusIndex >= visible.length - 1} onClick={() => moveFocus(1)}><ChevronRight size={22} /></button>
-        <div className="gallery-caption"><strong title={focusItem.name}>{focusItem.name}</strong><span>{focusItem.format.toUpperCase()} · {focusItem.width}×{focusItem.height} · {formatBytes(focusItem.bytes)} · 第 {focusIndex + 1} / {visible.length} 项</span></div>
-      </div> : null}
-      <div className="gallery-strip" role="listbox" aria-label="缩略图" ref={stripRef}>
-        {visible.map(item => {
-          const isChecked = checkedIds.has(item.id);
-          return <div className="gallery-thumb" key={item.id} data-marquee-id={item.id}>
-            {selectBox(item, isChecked)}
-            <button className={`gallery-thumb-btn${item.id === focusItem?.id ? ' focused' : ''}${isChecked ? ' checked' : ''}`} role="option" aria-selected={item.id === focusItem?.id} title={item.name} onClick={event => { setFocusId(item.id); if (event.shiftKey) handleSelect(item, event); }} onContextMenu={event => { setFocusId(item.id); openCardMenu(event, item); }}>
-              <StickerPreview src={imageUrl(library!.root, item.fileName)} name={item.name} />
-            </button>
-          </div>;
-        })}
-      </div>
-    </section>;
-  }
+  const quickLookOrder = quickLook && order.includes(quickLook) ? order : [quickLook];
+  const quickLookItem = quickLook ? index.byId.get(quickLook) : undefined;
+  const collectionNames = index.collections.map(([name]) => name);
 
   return (
-    <div className={`app-shell${marqueeRect ? ' marqueeing' : ''}`}>
-      {busy ? <div className="busy-overlay" aria-hidden="true" /> : null}
-      <aside className="sidebar" aria-label="资料库导航" data-window-drag-region>
-        <div className="window-handle" data-window-drag-region aria-hidden="true" />
-        <div className="brand" data-window-drag-region><img className="brand-icon" src="/icon.png" alt="" draggable={false} /><div><strong>拾趣</strong><span>StickerNest</span></div></div>
-        <p className="nav-caption" data-window-drag-region>我的资料库</p>
-        <nav>{navigation.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${source === id && !collection ? 'selected' : ''}`} aria-current={source === id && !collection ? 'page' : undefined} onClick={() => { setSource(id); setCollection(''); setPage(1); }}><Icon size={17} /><span>{label}</span><span className="count">{counts[id]}</span></button>)}</nav>
-        <div className="nav-divider" role="separator" />
-        <p className="nav-caption nav-caption-gap" data-window-drag-region>合集</p>
-        <nav aria-label="我的合集">
-          {collectionEntries.map(([name, count]) => <button key={name} className={`nav-item ${collection === name ? 'selected' : ''}`} aria-current={collection === name ? 'page' : undefined} onClick={() => { setCollection(current => current === name ? '' : name); setSource('all'); setPage(1); }}><FolderOpen size={15} /><span>{name}</span><span className="count">{count}</span></button>)}
-          <button className="nav-item new-collection" disabled={!library || disabled} onClick={() => setShowNewCollection(true)}><FolderPlus size={15} /><span>新建合集</span></button>
-        </nav>
-        <div className="nav-divider" role="separator" />
-        <p className="nav-caption nav-caption-gap" data-window-drag-region>整理</p>
-        <nav>
-          <button className={`nav-item ${source === 'similar' ? 'selected' : ''}`} aria-current={source === 'similar' ? 'page' : undefined} disabled={!library || !management} onClick={() => { setSource('similar'); setCollection(''); setPage(1); }}><ScanSearch size={16} /><span>相似项对比</span></button>
-          <button className={`nav-item ${source === 'trash' ? 'selected' : ''}`} aria-current={source === 'trash' ? 'page' : undefined} onClick={() => { setSource('trash'); setCollection(''); setPage(1); }}><Trash2 size={16} /><span>回收站</span><span className="count">{counts.trash}</span></button>
-        </nav>
-        <div className="sidebar-bottom">
-          <div className="settings-card" role="group" aria-label="库设置">
-            <button className="settings-item" disabled={disabled} onClick={openLibrary}><FolderOpen size={16} /><span>打开资料库</span></button>
-            <div className="settings-sep" role="separator" />
-            <button className="settings-item" disabled={disabled || !library} onClick={backupCurrentLibrary}><HardDriveDownload size={16} /><span>备份这个库</span></button>
-            <button className="settings-item" disabled={disabled} onClick={restoreFromBackup}><ArchiveRestore size={16} /><span>从备份恢复</span></button>
-          </div>
-        </div>
-      </aside>
+    <div className={`app${prefs.inspector ? ' with-inspector' : ''}`}>
+      <Sidebar index={index} nav={nav} libraryName={libraryName(root)} dropTarget={dropTarget}
+        onNav={navigate} onNewCollection={() => act.newCollection([])}
+        onCollectionMenu={openCollectionMenu} onLibraryMenu={openLibraryMenu} />
 
-      <main className="workspace" aria-busy={!!busy}>
-        <div className="page-top" data-window-drag-region>
-        <header className="page-header" data-window-drag-region>
-          <h1 data-window-drag-region>{heading}{headingCount !== null ? <span className="heading-count">{headingCount}</span> : null}</h1>
-          <div className="page-actions">
-            <div className="import-split">
-              <button className="button primary import-main" disabled={disabled || !library} onClick={importFiles}><ArrowDownToLine size={16} />导入表情</button>
-              <button className="button primary import-caret" aria-label="获取方式" aria-haspopup="menu" disabled={disabled} onClick={() => setShowMenu(open => !open)}><ChevronRight className="rotate-left" size={15} /></button>
-              {showMenu ? <div className="library-menu import-menu" role="menu" aria-label="获取表情的方式">
-                <button className="menu-item" onClick={() => { importFiles(); setShowMenu(false); }}><FolderOpen size={15} /><span className="menu-item-text"><strong>从本地图片导入</strong><span className="menu-item-hint">选择 PNG / GIF / WebP 文件</span></span></button>
-                <button className="menu-item" disabled={disabled || !library} onClick={() => { setShowWechat(true); setShowMenu(false); }}><MessageCircle size={15} /><span className="menu-item-text"><strong>从微信获取</strong><span className="menu-item-hint">本机直接获取或清单导入</span></span></button>
-                <button className="menu-item" disabled={disabled || !library} onClick={() => { setShowCollect(true); setShowMenu(false); }}><Music2 size={15} /><span className="menu-item-text"><strong>采集抖音收藏</strong><span className="menu-item-hint">从网页登录的抖音面板</span></span></button>
-              </div> : null}
-            </div>
-          </div>
-        </header>
-        {inReviewView ? null : <div className="toolbar" data-window-drag-region>
-          <label className="search-field"><Search size={18} /><input ref={searchRef} type="search" placeholder="搜索名称或标签…" aria-label="搜索名称或标签" value={query} onChange={event => { setQuery(event.target.value); setPage(1); }} disabled={!library} /></label>
-          <label className="source-select compact"><span>标签</span><select aria-label="按标签筛选" value={tag} onChange={event => { setTag(event.target.value); setPage(1); }} disabled={disabled || !library}><option value="">全部标签</option>{tagFacets.map(value => <option key={value}>{value}</option>)}</select></label>
-          {library ? <div className="toolbar-tail">
-            <span className="filtered-count">{query || tag || collection ? `筛选出 ${filtered.length} 项` : `共 ${filtered.length} 项`}</span>
-            <div className="view-switch" role="group" aria-label="显示模式">{VIEW_MODES.map(({ id, label, icon: Icon }) => <button key={id} type="button" className={view === id ? 'active' : ''} aria-pressed={view === id} title={label} onClick={() => setView(id)}><Icon size={15} /></button>)}</div>
-          </div> : null}
-        </div>}
-        </div>
-        {backupNotice ? <div className="notice success" role="status"><CheckCircle2 size={18} /><div><strong>{backupNotice.text}</strong><p className="notice-path" title={backupNotice.path}>{backupNotice.path}</p></div><button className="icon-button" aria-label="关闭备份结果" onClick={() => setBackupNotice(null)}><X size={17} /></button></div> : null}
-        {exportNotice ? <div className="notice success" role="status"><CheckCircle2 size={18} /><div><strong>已导出 {exportNotice.exported} 个素材{exportNotice.skipped ? `，跳过 ${exportNotice.skipped} 个` : ''}（原格式原字节）</strong><p className="notice-path" title={exportNotice.path}>{exportNotice.path}</p></div><button className="icon-button" aria-label="关闭导出结果" onClick={() => setExportNotice(null)}><X size={17} /></button></div> : null}
-        {managementError ? <div className="notice error" role="alert"><div><strong>整理记录未能读取</strong><p>{managementError}</p><p>编辑已停用，原记录保留；修复整理文件后重开资料库。</p></div></div> : null}
-        {!isDesktop ? <div className="notice"><CircleAlert size={18} /><p>请使用桌面应用打开本地资料库。</p></div> : null}
-        {busy ? <div className="notice" role="status"><LoaderCircle className="spin" size={18} /><p>{busy}…</p></div> : null}
-        {error ? <div className="notice error" role="alert"><CircleAlert size={18} /><div><strong>操作未完成</strong><p>{error}</p><p>检查文件或权限后重试。</p></div><button className="icon-button" aria-label="关闭错误提示" onClick={() => setError('')}><X size={17} /></button></div> : null}
-        {previewWarning ? <div className="notice warning" role="status"><CircleAlert size={18} /><div><strong>预览提示</strong><p>{previewWarning}</p><p>请检查原文件是否仍在。</p></div><button className="icon-button" aria-label="关闭预览提示" onClick={() => setPreviewWarning('')}><X size={17} /></button></div> : null}
-        {report ? <div className={`notice import-report ${report.failed.length ? 'warning' : 'success'}`} role="status"><CheckCircle2 size={18} /><div><strong>导入完成</strong><p>新增 {report.added} 个 · 重复 {report.duplicates} 个 · 失败 {report.failed.length} 个</p>{report.duplicates > 0 && trashSet.size > 0 ? <p>重复项未显示时，可能在回收站中。</p> : null}{report.failed.length ? <details><summary>查看失败文件</summary><ul>{report.failed.map((failure, index) => <li key={`${index}-${failure.name}`}><b>{failure.name}</b>：{failure.error}</li>)}</ul><p>修复后重新导入，已入库项会自动去重。</p></details> : null}</div><button className="icon-button" aria-label="关闭导入结果" onClick={() => setReport(null)}><X size={17} /></button></div> : null}
+      <main className="main">
+        <Toolbar ref={searchRef} title={title} subtitle={subtitle} mode={mode} prefs={prefs} query={query}
+          canEmptyTrash={index.counts.trash > 0} scanning={scanning}
+          onQuery={value => { setQuery(value); }} onPrefs={setPrefs}
+          onSortMenu={openSortMenu} onImportMenu={anchor => setMenu(menuAt(anchor, importItems))}
+          onEmptyTrash={() => act.deleteForever('all')} onRescan={() => void runScan()} />
 
-        {!library ? <section className="empty-state welcome"><span className="empty-icon"><Archive size={38} strokeWidth={1.4} /></span><h2>打开你的表情库</h2><p>把散落在各处的表情收进一个安静的画册。打开本地的 StickerNest Library 文件夹开始。</p><div className="empty-actions"><button className="button primary" disabled={disabled} onClick={openLibrary}><FolderOpen size={18} />打开资料库</button><button className="button secondary" disabled={disabled} onClick={restoreFromBackup}><ArchiveRestore size={18} />从备份恢复</button></div></section> : inReviewView ? <>
-        {management ? <SimilarReview report={scanReport} scanning={busy === '正在扫描相似项'} items={library.items} root={library.root} existingGroups={management.groups} onKeep={keepOneAsset} onIgnorePair={ignoreSimilarPair} onRescan={runScan} /> : null}
-        </> : visible.length === 0 ? <section className="empty-state"><span className="empty-icon">{inEmptyTrash ? <Trash2 size={36} strokeWidth={1.4} /> : <Images size={36} strokeWidth={1.4} />}</span><h2>{emptyTitle}</h2><p>{emptyHint}</p>{isFiltering ? <button className="button secondary" onClick={() => { setQuery(''); setTag(''); setCollection(''); setSource('all'); setPage(1); }}>查看全部表情</button> : source === 'trash' ? null : <button className="button primary" disabled={disabled} onClick={importFiles}><ArrowDownToLine size={18} />导入表情</button>}</section> : <>{showBatch && checkedIds.size ? <BatchPanel count={checkedIds.size} disabled={disabled} onRename={batchRenameSelected} onLabels={batchLabelsSelected} onTrash={trashSelected} onClose={() => setShowBatch(false)} /> : null}
-        {view === 'list' ? <section className="sticker-rows" aria-label="表情列表" onMouseDown={startMarquee}><div className="sticker-row head"><span className="row-box" /><div className="row-card"><span className="row-thumb" /><span className="row-name">名称</span><span className="row-cell">格式</span><span className="row-cell">尺寸</span><span className="row-cell">大小</span><span className="row-cell">导入时间</span></div></div>{visible.map(renderListRow)}</section> : view === 'gallery' ? renderGallery() : <section className={`sticker-grid${view === 'small' ? ' compact' : ''}`} aria-label="表情列表" onMouseDown={startMarquee}>{visible.map(renderGridCell)}</section>}
-        <div className="pagination"><label className="page-size">每页<select aria-label="每页显示数量" value={pageSize} onChange={event => { setPageSize(Number(event.target.value)); setPage(1); }}>{PAGE_SIZES.map(size => <option key={size} value={size}>{size}</option>)}</select></label><span>第 {visiblePage} / {totalPages} 页</span><button className="icon-button" aria-label="上一页" disabled={visiblePage === 1} onClick={() => setPage(visiblePage - 1)}><ChevronLeft size={20} /></button><button className="icon-button" aria-label="下一页" disabled={visiblePage === totalPages} onClick={() => setPage(visiblePage + 1)}><ChevronRight size={20} /></button></div></>}
-        {checkedIds.size > 0 && inSelectableView ? <div className="batch-dock" role="region" aria-label="批量操作">
-          <span className="batch-dock-count">已选 <b>{checkedIds.size}</b> 项</span>
-          <button className="button danger" disabled={disabled || !library} onClick={() => void trashSelected()}><Trash2 size={15} />移入回收站</button>
-          <button className="text-button" disabled={disabled} onClick={() => setCheckedIds(new Set())}>清除选择</button>
-        </div> : null}
-        <footer className="library-footer"><Folder size={14} /><span title={library?.root}>{library?.root ?? '尚未选择资料库'}</span><span className="footer-count">{library ? `${library.items.length} 个原始素材` : '本地资料库'}</span></footer>
+        {lib.managementError ? <p className="banner" role="alert">整理记录读取失败：{lib.managementError}。收藏、合集与回收站暂不可用。</p> : null}
+
+        {nav.kind === 'similar' ? (
+          <div className="similar-scroller">
+            <SimilarReview report={scanReport} scanning={scanning} items={index.items} root={root}
+              existingGroups={management?.groups ?? []}
+              onRescan={() => void runScan()}
+              onKeep={async (_keepId, removedIds) => {
+                lib.setManagement(await lib.write(rootPath => api.setTrash(rootPath, removedIds, true)));
+                setScanReport(report => report && pruneReviewed(report, removedIds));
+              }}
+              onIgnorePair={async (a, b) => {
+                lib.setManagement(await lib.write(rootPath => api.ignorePair(rootPath, a, b)));
+                setScanReport(report => report && withoutPair(report, a, b));
+              }} />
+          </div>
+        ) : (
+          <StickerGrid items={items} root={root} index={index} view={prefs.view} tileSize={prefs.tileSize}
+            selection={selection} resetKey={`${nav.kind}:${'value' in nav ? nav.value : ''}:${query}:${prefs.sort}`}
+            onSelection={setSelection} onColumns={setColumns} onOpen={act.quickLook}
+            onContextMenu={openGridMenu} onDragOut={ids => void dragOut(ids)}
+            empty={<GridEmpty nav={nav} query={query} libraryEmpty={!library.items.length}
+              onClearQuery={() => setQuery('')}
+              onImport={() => void lib.importPick(false)}
+              onWechat={() => setDialog({ kind: 'import-wechat' })}
+              onDouyin={() => setDialog({ kind: 'collect-douyin' })} />} />
+        )}
+
+        {selectedIds.length > 1 && nav.kind !== 'similar' ? (
+          <SelectionBar count={selectedIds.length} inTrash={inTrash}
+            onCopy={() => act.copy(selectedIds)}
+            onCollect={anchor => setMenu(menuAt(anchor, collectionItems(selectedIds), true))}
+            onExport={() => act.exportIds(selectedIds)}
+            onTrash={() => act.trash(selectedIds)}
+            onRestore={() => act.restore(selectedIds)}
+            onDelete={() => act.deleteForever(selectedIds)}
+            onClear={() => setSelection(emptySelection())} />
+        ) : null}
+
+        {dropCount ? (
+          <div className="drop-overlay" aria-live="polite">
+            <div className="drop-card"><Inbox size={28} /><strong>松开以导入</strong><span>{dropCount} 个项目，文件夹会包含其中的图片</span></div>
+          </div>
+        ) : null}
       </main>
-      {marqueeRect ? <div className="marquee-rect" style={marqueeRect} aria-hidden="true" /> : null}
-      {selected && library ? <StickerDetail key={selected.id} item={selected} root={library.root} metadata={management?.metadata[selected.id]} editable={!!management && !disabled} trashed={!!management?.trash[selected.id]} trashedAt={management?.trash[selected.id]} edit={selectedEdit} onSave={metadata => editMetadata(selected.id, metadata)} onSetTrash={value => setItemsTrash([selected.id], value)} onClose={() => { setSelected(null); setSelectedEdit(false); }} /> : null}
-      {showCollect && library && management ? <CollectDialog root={library.root} accounts={management.accounts.filter(a => a.platform === '抖音')} onSnapshot={(snapshot, warning) => { setLibrary(snapshot); setPage(1); if (warning) setPreviewWarning(warning); }} onManagement={setManagement} onError={setError} onClose={() => setShowCollect(false)} /> : null}
-      {showWechat && library && management ? <WeChatImportDialog root={library.root} accounts={management.accounts.filter(a => a.platform === '微信')} onSnapshot={(snapshot, warning) => { setLibrary(snapshot); setPage(1); if (warning) setPreviewWarning(warning); }} onManagement={setManagement} onError={setError} onClose={() => setShowWechat(false)} /> : null}
-      {ctxMenu && library && management ? <ContextMenu x={ctxMenu.x} y={ctxMenu.y} onClose={() => setCtxMenu(null)} items={contextMenuItems()} /> : null}
-      {showNewCollection && library && management ? <NewCollectionDialog checkedCount={checkedIds.size} existingNames={collectionEntries.map(([name]) => name)} disabled={disabled} onCreate={createCollection} onClose={() => setShowNewCollection(false)} /> : null}
+
+      {prefs.inspector ? (
+        <Inspector ids={nav.kind === 'similar' ? [] : selectedIds} index={index} management={management} root={root}
+          libraryName={libraryName(root)} inTrash={inTrash} focusToken={focusToken} actions={inspectorActions} />
+      ) : null}
+
+      {menu ? <ContextMenu x={menu.x} y={menu.y} above={menu.above} items={menu.items} onClose={() => setMenu(null)} /> : null}
+
+      {quickLookItem ? (
+        <QuickLook item={quickLookItem} root={root}
+          position={quickLookOrder.indexOf(quickLook)} total={quickLookOrder.length}
+          favorite={!!index.favorites[quickLook]}
+          onStep={delta => {
+            const next = quickLookOrder[quickLookOrder.indexOf(quickLook) + delta];
+            if (!next) return;
+            setQuickLook(next);
+            if (order.includes(next)) setSelection({ ids: new Set([next]), anchor: next });
+          }}
+          onCopy={() => act.copy([quickLook])}
+          onFavorite={() => act.favorite([quickLook], !index.favorites[quickLook])}
+          onClose={() => setQuickLook('')} />
+      ) : null}
+
+      {dialog?.kind === 'new-collection' ? (
+        <PromptDialog title={dialog.ids.length ? `用 ${dialog.ids.length} 个表情新建合集` : '新建合集'} label="合集名称" placeholder="例如：日常、工作、阴阳怪气" confirmLabel="创建"
+          validate={value => validateCollectionName(value, collectionNames)}
+          onSubmit={async name => {
+            lib.setManagement(await lib.write(rootPath => api.addCollection(rootPath, name, dialog.ids)));
+            if (dialog.ids.length) toast.push({ kind: 'success', title: `已创建「${name}」`, detail: `加入了 ${dialog.ids.length} 个表情` });
+            else navigate({ kind: 'collection', value: name });
+          }}
+          onClose={() => setDialog(null)} />
+      ) : null}
+
+      {dialog?.kind === 'rename-collection' ? (
+        <PromptDialog title="重命名合集" label="合集名称" initial={dialog.name} confirmLabel="重命名"
+          validate={value => validateCollectionName(value, collectionNames, dialog.name)}
+          onSubmit={async name => {
+            if (name === dialog.name) return;
+            lib.setManagement(await lib.write(rootPath => api.renameCollection(rootPath, dialog.name, name)));
+            if (sameNav(nav, { kind: 'collection', value: dialog.name })) setNav({ kind: 'collection', value: name });
+          }}
+          onClose={() => setDialog(null)} />
+      ) : null}
+
+      {dialog?.kind === 'delete-collection' ? (
+        <ConfirmDialog title={`删除合集「${dialog.name}」？`} confirmLabel="删除合集" danger
+          message="合集里的表情不会被删除，仍在资料库中。"
+          onConfirm={async () => {
+            lib.setManagement(await lib.write(rootPath => api.deleteCollection(rootPath, dialog.name)));
+            if (sameNav(nav, { kind: 'collection', value: dialog.name })) navigate({ kind: 'all' });
+          }}
+          onClose={() => setDialog(null)} />
+      ) : null}
+
+      {dialog?.kind === 'delete-forever' ? (
+        <ConfirmDialog
+          title={dialog.ids === 'all' ? `清空回收站中的 ${index.counts.trash} 项？` : `彻底删除 ${dialog.ids.length} 项？`}
+          confirmLabel="彻底删除" danger
+          message="原文件会移到系统废纸篓，并从资料库、合集和整理记录中移除。"
+          onConfirm={async () => { await lib.deleteForever(dialog.ids); }}
+          onClose={() => setDialog(null)} />
+      ) : null}
+
+      {dialog?.kind === 'batch-rename' ? (
+        <BatchRenameDialog count={dialog.ids.length}
+          onSubmit={async (prefix, start) => {
+            lib.setManagement(await lib.write(rootPath => api.batchRename(rootPath, dialog.ids, prefix, start)));
+            toast.push({ kind: 'success', title: `已重命名 ${dialog.ids.length} 个表情` });
+          }}
+          onClose={() => setDialog(null)} />
+      ) : null}
+
+      {dialog?.kind === 'collect-douyin' && management ? (
+        <CollectDialog root={root} accounts={management.accounts.filter(account => account.platform === '抖音')}
+          onSnapshot={(snapshot, warning) => { lib.setLibrary(snapshot); if (warning) toast.push({ kind: 'error', title: '部分素材无法预览', detail: warning }); }}
+          onManagement={lib.setManagement} onError={() => undefined} onClose={() => setDialog(null)} />
+      ) : null}
+
+      {dialog?.kind === 'import-wechat' && management ? (
+        <WeChatImportDialog root={root} accounts={management.accounts.filter(account => account.platform === '微信')}
+          onSnapshot={(snapshot, warning) => { lib.setLibrary(snapshot); if (warning) toast.push({ kind: 'error', title: '部分素材无法预览', detail: warning }); }}
+          onManagement={lib.setManagement} onError={() => undefined} onClose={() => setDialog(null)} />
+      ) : null}
+
+      <Toasts toasts={toast.toasts} onDismiss={toast.dismiss} />
     </div>
   );
 }
 
-function NewCollectionDialog({ checkedCount, existingNames, disabled, onCreate, onClose }: {
-  checkedCount: number;
-  existingNames: string[];
-  disabled: boolean;
-  onCreate: (name: string) => Promise<void>;
-  onClose: () => void;
+function GridEmpty({ nav, query, libraryEmpty, onClearQuery, onImport, onWechat, onDouyin }: {
+  nav: Nav; query: string; libraryEmpty: boolean;
+  onClearQuery: () => void; onImport: () => void; onWechat: () => void; onDouyin: () => void;
 }) {
-  const [name, setName] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-  const dialog = useRef<HTMLDialogElement>(null);
-  const savingRef = useRef(false);
-  useEffect(() => {
-    const trigger = document.activeElement as HTMLElement | null;
-    dialog.current?.showModal();
-    return () => { dialog.current?.close(); trigger?.focus(); };
-  }, []);
-  async function save() {
-    if (savingRef.current) return;
-    const trimmed = name.trim();
-    if (!trimmed) { setError('请填写合集名称。'); return; }
-    if (trimmed.length > 50) { setError('合集名称最多 50 字。'); return; }
-    if (existingNames.includes(trimmed)) { setError(`合集“${trimmed}”已存在。`); return; }
-    savingRef.current = true; setSaving(true); setError('');
-    try { await onCreate(trimmed); }
-    catch (reason) { setError(String(reason)); savingRef.current = false; setSaving(false); }
+  if (query.trim()) {
+    return <EmptyState icon={<SearchX size={30} />} title={`没有找到「${query.trim()}」`}
+      actions={<button className="btn" onClick={onClearQuery}>清除搜索</button>}>搜索会匹配表情名称和标签。</EmptyState>;
   }
-  return (
-    <dialog className="detail-dialog collect-dialog" ref={dialog} onClose={() => { if (!dialog.current?.open) onClose(); }} aria-labelledby="new-collection-title" onCancel={event => { if (savingRef.current) event.preventDefault(); }}>
-      <div className="detail-heading"><span className="eyebrow">新建合集</span><button className="icon-button" autoFocus disabled={saving} onClick={() => dialog.current?.close()} aria-label="关闭"><X size={18} /></button></div>
-      <div className="detail-content collect-content">
-        <h2 id="new-collection-title">新建合集</h2>
-        <p className="field-hint">{checkedCount ? `当前已勾选 ${checkedCount} 项表情，创建后会一并放入合集。` : '可以直接创建空合集，之后勾选表情，在右键菜单里选择「复制到合集」或「移动到合集」。'}</p>
-        <form className="metadata-editor" onSubmit={event => { event.preventDefault(); void save(); }}>
-          <label className="field-label">合集名称<input value={name} maxLength={50} autoFocus={false} disabled={saving || disabled} onChange={event => setName(event.target.value)} /></label>
-          {error ? <p className="field-error" role="alert">{error}</p> : null}
-          <div className="editor-actions"><button className="button primary" type="submit" disabled={saving || disabled || !name.trim()}>{saving ? '正在创建…' : checkedCount ? '创建并放入所选' : '创建空合集'}</button><button className="button secondary" type="button" disabled={saving} onClick={() => dialog.current?.close()}>取消</button></div>
-        </form>
-      </div>
-    </dialog>
-  );
+  const importActions = <>
+    <button className="btn" onClick={onWechat}><MessageCircle size={14} />从微信导入</button>
+    <button className="btn" onClick={onDouyin}><Music2 size={14} />从抖音导入</button>
+    <button className="btn" onClick={onImport}><FolderOpen size={14} />本地图片</button>
+  </>;
+  switch (nav.kind) {
+    case 'all':
+      return libraryEmpty
+        ? <EmptyState icon={<Images size={30} />} title="资料库还是空的" actions={importActions}>从微信、抖音导入收藏的表情，或者直接把图片、文件夹拖进窗口。</EmptyState>
+        : <EmptyState icon={<Images size={30} />} title="没有可显示的表情">所有表情都在回收站里。</EmptyState>;
+    case 'favorites':
+      return <EmptyState icon={<Star size={30} />} title="还没有收藏">选中表情后点星标，常用的就会集中在这里。</EmptyState>;
+    case 'recent':
+      return <EmptyState icon={<Clock size={30} />} title="还没有使用记录">复制或拖出过的表情会按时间出现在这里。</EmptyState>;
+    case 'source':
+      return <EmptyState icon={nav.value === '微信' ? <MessageCircle size={30} /> : nav.value === '抖音' ? <Music2 size={30} /> : <FolderOpen size={30} />}
+        title={`还没有${nav.value === '本地' ? '本地导入' : `来自${nav.value}`}的表情`}
+        actions={<button className="btn btn-primary" onClick={nav.value === '微信' ? onWechat : nav.value === '抖音' ? onDouyin : onImport}>
+          {nav.value === '微信' ? '从微信导入…' : nav.value === '抖音' ? '从抖音导入…' : '导入本地图片…'}</button>} />;
+    case 'collection':
+      return <EmptyState icon={<Library size={30} />} title="合集是空的">右键表情选择「加入合集」，或把表情拖到左侧的合集上。</EmptyState>;
+    case 'trash':
+      return <EmptyState icon={<Trash2 size={30} />} title="回收站是空的">移入回收站的表情可以随时恢复。</EmptyState>;
+    default:
+      return null;
+  }
 }

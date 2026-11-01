@@ -4,6 +4,9 @@ pub mod collection_runtime;
 pub mod library;
 pub mod management;
 pub mod similar;
+pub mod sharing;
+mod native;
+mod preferences;
 pub mod wechat;
 pub mod wechat_db;
 use management::ManagementSnapshot;
@@ -48,6 +51,7 @@ async fn select_library(
                 if PathBuf::from(&path).canonicalize().ok().as_ref()
                     == Some(&PathBuf::from(library.snapshot().root))
                 {
+                    remember_library(&app, &library.snapshot().root);
                     return Ok(library.snapshot());
                 }
             }
@@ -62,6 +66,7 @@ async fn select_library(
             return Err(format!("资料库预览授权失败：{}", warnings.join("；")));
         }
         let snapshot = library.snapshot();
+        remember_library(&app, &snapshot.root);
         // A failed selection leaves the currently open library untouched.
         *current = Some(library);
         Ok(snapshot)
@@ -234,10 +239,12 @@ async fn backup_library(
     .map_err(|e| e.to_string())?
 }
 #[tauri::command]
-async fn restore_backup(backup_dir: String, target_parent: String) -> Result<String, String> {
+async fn restore_backup(app: tauri::AppHandle, backup_dir: String, target_parent: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        backup::restore(&PathBuf::from(backup_dir), &PathBuf::from(target_parent))
-            .map(|path| path.to_string_lossy().into_owned())
+        let path = backup::restore(&PathBuf::from(backup_dir), &PathBuf::from(target_parent))?;
+        let root = path.to_string_lossy().into_owned();
+        remember_library(&app, &root);
+        Ok(root)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -536,9 +543,117 @@ fn export_assets(
     library.export_assets(Path::new(&target_parent), &asset_ids, &name_map)
 }
 
+/// Best effort: failing to remember the library must not fail opening it.
+fn remember_library(app: &tauri::AppHandle, root: &str) {
+    if let Ok(config) = app.path().app_config_dir() {
+        if let Err(error) = preferences::remember(&config, root) {
+            eprintln!("无法记住资料库位置：{error}");
+        }
+    }
+}
+
+#[tauri::command]
+async fn drag_icon(app: tauri::AppHandle, expected_root: String, asset_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<LibraryState>();
+        let current = state.0.lock().map_err(|_| "资料库忙")?;
+        current.as_ref().ok_or("请先打开资料库")?.drag_icon(&expected_root, &asset_id)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn reveal_in_finder(app: tauri::AppHandle, expected_root: String, asset_ids: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<LibraryState>();
+        let current = state.0.lock().map_err(|_| "资料库忙")?;
+        let library = current.as_ref().ok_or("请先打开资料库")?;
+        library.check_expected_root(&expected_root)?;
+        let paths = if asset_ids.is_empty() { vec![PathBuf::from(expected_root)] }
+            else { library.validate_selection(&asset_ids)? };
+        native::reveal(&paths)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn set_favorite(state: State<'_, LibraryState>, expected_root: String, asset_ids: Vec<String>, favorite: bool) -> Result<ManagementSnapshot, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    current.as_ref().ok_or("请先打开资料库")?.set_favorite(&expected_root, asset_ids, favorite)
+}
+#[tauri::command]
+fn mark_used(state: State<'_, LibraryState>, expected_root: String, asset_ids: Vec<String>) -> Result<ManagementSnapshot, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    current.as_ref().ok_or("请先打开资料库")?.mark_used(&expected_root, asset_ids)
+}
+#[tauri::command]
+fn rename_collection(state: State<'_, LibraryState>, expected_root: String, from: String, to: String) -> Result<ManagementSnapshot, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    current.as_ref().ok_or("请先打开资料库")?.rename_collection(&expected_root, from, to)
+}
+#[tauri::command]
+fn delete_collection(state: State<'_, LibraryState>, expected_root: String, name: String) -> Result<ManagementSnapshot, String> {
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    current.as_ref().ok_or("请先打开资料库")?.delete_collection(&expected_root, name)
+}
+#[tauri::command]
+async fn prepare_wechat(app: tauri::AppHandle, expected_root: String, asset_ids: Vec<String>) -> Result<sharing::PreparedWechat, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<LibraryState>();
+        let current = state.0.lock().map_err(|_| "资料库忙")?;
+        current.as_ref().ok_or("请先打开资料库")?.prepare_wechat(&expected_root, &asset_ids)
+    }).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn asset_paths(app: tauri::AppHandle, expected_root: String, asset_ids: Vec<String>, wechat_ready: bool) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<LibraryState>();
+        let current = state.0.lock().map_err(|_| "资料库忙")?;
+        current.as_ref().ok_or("请先打开资料库")?.asset_paths(&expected_root, &asset_ids, wechat_ready)
+    }).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn copy_to_clipboard(app: tauri::AppHandle, expected_root: String, asset_ids: Vec<String>, wechat_ready: bool) -> Result<sharing::ClipboardResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<LibraryState>();
+        let current = state.0.lock().map_err(|_| "资料库忙")?;
+        let library = current.as_ref().ok_or("请先打开资料库")?;
+        let prepared = if wechat_ready { library.prepare_wechat(&expected_root, &asset_ids)? }
+            else { sharing::PreparedWechat { paths: library.asset_paths(&expected_root, &asset_ids, false)?, converted: 0, oversized: vec![] } };
+        native::copy(&prepared.paths)?;
+        library.mark_used(&expected_root, asset_ids)?;
+        Ok(sharing::ClipboardResult { count: prepared.paths.len(), converted: prepared.converted, oversized: prepared.oversized })
+    }).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn delete_permanently(app: tauri::AppHandle, expected_root: String, asset_ids: Vec<String>) -> Result<library::DeleteResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<LibraryState>();
+        let mut current = state.0.lock().map_err(|_| "资料库忙")?;
+        current.as_mut().ok_or("请先打开资料库")?.delete_permanently(&expected_root, asset_ids)
+    }).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn empty_trash(app: tauri::AppHandle, expected_root: String) -> Result<library::DeleteResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<LibraryState>();
+        let mut current = state.0.lock().map_err(|_| "资料库忙")?;
+        current.as_mut().ok_or("请先打开资料库")?.empty_trash(&expected_root)
+    }).await.map_err(|e| e.to_string())?
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_drag::init())
+        .setup(|app| {
+            if let Ok(config) = app.path().app_config_dir() {
+                let library = preferences::reopen(&config, |library| {
+                    if authorize_assets(app.handle(), library).is_empty() { Ok(()) }
+                    else { Err("资料库预览授权失败".into()) }
+                });
+                *app.state::<LibraryState>().0.lock().map_err(|_| "资料库忙")? = library;
+            }
+            Ok(())
+        })
         .manage(LibraryState::default())
         .invoke_handler(tauri::generate_handler![
             select_library,
@@ -551,6 +666,17 @@ pub fn run() {
             batch_rename,
             batch_labels,
             set_trash,
+            reveal_in_finder,
+            set_favorite,
+            mark_used,
+            prepare_wechat,
+            copy_to_clipboard,
+            asset_paths,
+            drag_icon,
+            delete_permanently,
+            empty_trash,
+            rename_collection,
+            delete_collection,
             backup_library,
             restore_backup,
             scan_duplicates,

@@ -11,22 +11,18 @@
 
 ## 功能
 
-- 导入本地表情，提供微信、抖音导入流程。
-- 大图标、小图标、列表、画廊四种视图，支持名称与标签搜索。
-- 创建合集，单个或批量重命名、设置标签、整理归类。
+- 从微信、抖音或本地文件夹导入，按来源归档；拖入图片或文件夹即可导入。
+- 选中后 ⌘C 复制或直接拖到微信聊天窗口，抖音的 webp 会自动转成微信可用的 GIF / PNG。
+- 网格与列表两种视图，名称搜索、收藏、最近使用，空格快速查看。
+- 用合集整理表情，支持批量重命名；右键或拖到侧栏合集即可归类。
 - 扫描相似表情并选择保留项，误删内容可从回收站恢复。
-- 导出选中原图，备份与恢复整个资料库。
+- 导出选中原图，备份与恢复整个资料库；界面跟随系统浅色 / 深色。
 
 ## 安装使用
 
-下载 [Apple Silicon 安装包](https://github.com/b1mango/StickerNest/releases/download/v0.0.1/StickerNest_0.0.1_aarch64.dmg)，打开 DMG，将 StickerNest 拖入「应用程序」。
+下载 [Apple Silicon 安装包](https://github.com/b1mango/StickerNest/releases/download/v0.0.2/StickerNest_0.0.2_aarch64.dmg)，打开 DMG，将 StickerNest 拖入「应用程序」。
 
-启动后打开已有的 `StickerNest Library` 文件夹，或从备份恢复。首次建库目前需在源码目录执行以下命令，将输入路径替换为你的表情文件夹：
-
-```sh
-cargo run --manifest-path src-tauri/Cargo.toml --bin import-local -- \
-  --input /path/to/stickers --library ~/StickerNest --create --source 本地
-```
+首次启动选择「新建资料库」，或打开已有的 `StickerNest Library` 文件夹、从备份恢复；之后会自动打开上次使用的资料库。
 
 ## 开发
 

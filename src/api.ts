@@ -1,12 +1,26 @@
 import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import type { BackupSummary, Snapshot, ImportReport } from './types';
+import { startDrag } from '@crabnebula/tauri-plugin-drag';
+import type {
+  AssetMetadata, BackupSummary, ClipboardResult, DeleteResult, ExportSummary, ImportResult,
+  ManagementSnapshot, ScanReport, Snapshot,
+} from './types';
 
 export const isDesktop = isTauri();
 
+/** Dev-only hook: the browser mock swaps asset URLs for generated previews. */
+let assetUrlOverride: ((fileName: string) => string) | null = null;
+export function setAssetUrlOverride(fn: (fileName: string) => string) { assetUrlOverride = fn; }
+
+export function imageUrl(root: string, fileName: string): string {
+  return assetUrlOverride ? assetUrlOverride(fileName) : convertFileSrc(`${root}/assets/${fileName}`);
+}
+
+// ---- Library ----
+
 export async function chooseLibrary(create: boolean): Promise<Snapshot | null> {
   const path = await open({ directory: true, multiple: false,
-    title: create ? '选择资料库的存放位置' : '打开 StickerNest Library 文件夹' });
+    title: create ? '选择新资料库的存放位置' : '打开 StickerNest Library 文件夹' });
   if (!path) return null;
   return invoke<Snapshot>('select_library', { path, create });
 }
@@ -16,32 +30,121 @@ export async function currentLibrary(): Promise<Snapshot | null> {
   return invoke<Snapshot | null>('current_library');
 }
 
-export async function importImages(source: string): Promise<{ snapshot: Snapshot; report: ImportReport; previewWarnings: string[] } | null> {
-  const paths = await open({ multiple: true, directory: false, title: '选择要导入的表情',
-    filters: [{ name: '图片与动图', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }] });
-  if (!paths) return null;
-  return invoke('import_images', { paths: typeof paths === 'string' ? [paths] : paths, source });
+export function openLibraryPath(path: string): Promise<Snapshot> {
+  return invoke<Snapshot>('select_library', { path, create: false });
 }
 
-export function imageUrl(root: string, fileName: string): string {
-  return convertFileSrc(`${root}/assets/${fileName}`);
-}
-
-export async function getManagement(): Promise<import('./types').ManagementSnapshot> {
+export function getManagement(): Promise<ManagementSnapshot> {
   return invoke('get_management');
 }
 
-export async function saveMetadata(expectedRoot: string, assetId: string, metadata: import('./types').AssetMetadata): Promise<import('./types').ManagementSnapshot> {
+export function revealInFinder(expectedRoot: string, assetIds: string[]): Promise<void> {
+  return invoke('reveal_in_finder', { expectedRoot, assetIds });
+}
+
+// ---- Import ----
+
+const IMAGE_FILTER = [{ name: '图片与动图', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }];
+
+export async function pickImportPaths(folder: boolean): Promise<string[] | null> {
+  const paths = await open(folder
+    ? { directory: true, multiple: true, title: '选择包含表情的文件夹' }
+    : { directory: false, multiple: true, title: '选择要导入的表情', filters: IMAGE_FILTER });
+  if (!paths) return null;
+  return typeof paths === 'string' ? [paths] : paths;
+}
+
+export function importPaths(paths: string[], source = '本地'): Promise<ImportResult> {
+  return invoke('import_images', { paths, source });
+}
+
+// ---- Metadata & organizing ----
+
+export function saveMetadata(expectedRoot: string, assetId: string, metadata: AssetMetadata): Promise<ManagementSnapshot> {
   return invoke('save_metadata', { expectedRoot, assetId, ...metadata });
 }
 
-export async function addCollection(expectedRoot: string, name: string, assetIds: string[]): Promise<import('./types').ManagementSnapshot> {
+export function batchRename(expectedRoot: string, assetIds: string[], prefix: string, start: number): Promise<ManagementSnapshot> {
+  return invoke('batch_rename', { expectedRoot, assetIds, prefix, start });
+}
+
+export function batchLabels(expectedRoot: string, assetIds: string[], addTags: string[], removeTags: string[], addCollections: string[], removeCollections: string[]): Promise<ManagementSnapshot> {
+  return invoke('batch_labels', { expectedRoot, assetIds, addTags, removeTags, addCollections, removeCollections });
+}
+
+export function addCollection(expectedRoot: string, name: string, assetIds: string[]): Promise<ManagementSnapshot> {
   return invoke('add_collection', { expectedRoot, name, assetIds });
 }
 
-export async function setTrash(expectedRoot: string, assetIds: string[], trashed: boolean): Promise<import('./types').ManagementSnapshot> {
+export function renameCollection(expectedRoot: string, from: string, to: string): Promise<ManagementSnapshot> {
+  return invoke('rename_collection', { expectedRoot, from, to });
+}
+
+export function deleteCollection(expectedRoot: string, name: string): Promise<ManagementSnapshot> {
+  return invoke('delete_collection', { expectedRoot, name });
+}
+
+export function setFavorite(expectedRoot: string, assetIds: string[], favorite: boolean): Promise<ManagementSnapshot> {
+  return invoke('set_favorite', { expectedRoot, assetIds, favorite });
+}
+
+export function markUsed(expectedRoot: string, assetIds: string[]): Promise<ManagementSnapshot> {
+  return invoke('mark_used', { expectedRoot, assetIds });
+}
+
+export function saveGroupMetadata(expectedRoot: string, groupId: string, tags: string[], collections: string[]): Promise<ManagementSnapshot> {
+  return invoke('save_group_metadata', { expectedRoot, groupId, tags, collections });
+}
+
+export function disbandGroup(expectedRoot: string, groupId: string): Promise<ManagementSnapshot> {
+  return invoke('disband_group', { expectedRoot, groupId });
+}
+
+// ---- Trash ----
+
+export function setTrash(expectedRoot: string, assetIds: string[], trashed: boolean): Promise<ManagementSnapshot> {
   return invoke('set_trash', { expectedRoot, assetIds, trashed });
 }
+
+export function deletePermanently(expectedRoot: string, assetIds: string[]): Promise<DeleteResult> {
+  return invoke('delete_permanently', { expectedRoot, assetIds });
+}
+
+export function emptyTrash(expectedRoot: string): Promise<DeleteResult> {
+  return invoke('empty_trash', { expectedRoot });
+}
+
+// ---- Using stickers elsewhere ----
+
+export function copyToClipboard(expectedRoot: string, assetIds: string[], wechatReady: boolean): Promise<ClipboardResult> {
+  return invoke('copy_to_clipboard', { expectedRoot, assetIds, wechatReady });
+}
+
+export function assetPaths(expectedRoot: string, assetIds: string[], wechatReady: boolean): Promise<string[]> {
+  return invoke('asset_paths', { expectedRoot, assetIds, wechatReady });
+}
+
+/**
+ * Hands the selection to a native drag session (WeChat-ready copies, so Douyin WebP
+ * lands in WeChat as GIF/PNG). Resolves when the session ends; true when dropped.
+ */
+export async function dragOut(expectedRoot: string, assetIds: string[]): Promise<boolean> {
+  const [paths, icon] = await Promise.all([
+    assetPaths(expectedRoot, assetIds, true),
+    invoke<string>('drag_icon', { expectedRoot, assetId: assetIds[0] }),
+  ]);
+  return new Promise((resolve, reject) => {
+    startDrag({ item: paths, icon, mode: 'copy' }, payload => resolve(payload.result === 'Dropped')).catch(reject);
+  });
+}
+
+export async function exportAssets(expectedRoot: string, assetIds: string[], nameMap: Record<string, string>): Promise<ExportSummary | null> {
+  const path = await open({ directory: true, multiple: false, title: '选择导出位置（将新建导出文件夹）' });
+  if (!path) return null;
+  return invoke('export_assets', { expectedRoot, assetIds, targetParent: path, nameMap });
+}
+
+// ---- Backup ----
 
 export async function backupLibrary(): Promise<BackupSummary | null> {
   const path = await open({ directory: true, multiple: false, title: '选择备份存放位置（将新建备份文件夹）' });
@@ -57,63 +160,47 @@ export async function restoreBackup(): Promise<string | null> {
   return invoke('restore_backup', { backupDir: backup, targetParent: parent });
 }
 
-export function openLibraryPath(path: string): Promise<Snapshot> {
-  return invoke<Snapshot>('select_library', { path, create: false });
-}
+// ---- Similar items ----
 
-export async function scanDuplicates(): Promise<import('./types').ScanReport> {
+export function scanDuplicates(): Promise<ScanReport> {
   return invoke('scan_duplicates');
 }
 
-export async function createGroup(expectedRoot: string, memberIds: string[], mainAssetId: string, tags: string[], collections: string[]): Promise<import('./types').ManagementSnapshot> {
-  return invoke('create_group', { expectedRoot, memberIds, mainAssetId, tags, collections });
+export function ignorePair(expectedRoot: string, assetA: string, assetB: string): Promise<ManagementSnapshot> {
+  return invoke('ignore_pair', { expectedRoot, assetA, assetB });
 }
 
-export async function disbandGroup(expectedRoot: string, groupId: string): Promise<import('./types').ManagementSnapshot> {
-  return invoke('disband_group', { expectedRoot, groupId });
-}
+// ---- Platform collection (Douyin / WeChat) ----
 
-export async function saveGroupMetadata(expectedRoot: string, groupId: string, tags: string[], collections: string[]): Promise<import('./types').ManagementSnapshot> {
-  return invoke('save_group_metadata', { expectedRoot, groupId, tags, collections });
-}
-
-export async function batchRename(expectedRoot: string, assetIds: string[], prefix: string, start: number): Promise<import('./types').ManagementSnapshot> {
-  return invoke('batch_rename', { expectedRoot, assetIds, prefix, start });
-}
-
-export async function batchLabels(expectedRoot: string, assetIds: string[], addTags: string[], removeTags: string[], addCollections: string[], removeCollections: string[]): Promise<import('./types').ManagementSnapshot> {
-  return invoke('batch_labels', { expectedRoot, assetIds, addTags, removeTags, addCollections, removeCollections });
-}
-
-export async function collectDouyinFetch(chromePort?: number): Promise<{ stage: string; detail: string }> {
+export function collectDouyinFetch(chromePort?: number): Promise<{ stage: string; detail: string }> {
   return invoke('collect_douyin_fetch', { chromePort: chromePort ?? null });
 }
 
-export async function collectDouyinImport(): Promise<{ snapshot: Snapshot; report: ImportReport; previewWarnings: string[]; reportPath: string }> {
+export function collectDouyinImport(): Promise<ImportResult & { reportPath: string }> {
   return invoke('collect_douyin_import');
 }
 
-export async function importProvenanceAtPath(expectedRoot: string, path: string, accountAlias: string, accountId: string | null, platform?: string): Promise<import('./types').ManagementSnapshot> {
+export function importProvenanceAtPath(expectedRoot: string, path: string, accountAlias: string, accountId: string | null, platform?: string): Promise<ManagementSnapshot> {
   return invoke('import_provenance', { expectedRoot, path, accountAlias, accountId, platform: platform ?? null });
 }
 
-export async function importWechatManifest(manifestPath: string): Promise<{ stage: string; detail: string }> {
+export function importWechatManifest(manifestPath: string): Promise<{ stage: string; detail: string }> {
   return invoke('import_wechat_manifest', { manifestPath });
 }
 
-export async function collectWechatImport(): Promise<{ snapshot: Snapshot; report: ImportReport; previewWarnings: string[]; reportPath: string }> {
+export function collectWechatImport(): Promise<ImportResult & { reportPath: string }> {
   return invoke('collect_wechat_import');
 }
 
-export async function wechatDetectAccounts(): Promise<{ wxid: string; hasDb: boolean; hasCachedKey: boolean }[]> {
+export function wechatDetectAccounts(): Promise<{ wxid: string; hasDb: boolean; hasCachedKey: boolean }[]> {
   return invoke('wechat_detect_accounts');
 }
 
-export async function wechatCheckRunning(): Promise<number> {
+export function wechatCheckRunning(): Promise<number> {
   return invoke('wechat_check_running');
 }
 
-export async function wechatDumpAndExport(wxid: string): Promise<{ urlsTxt: string; count: number; stageDetail: string; usedCachedKey: boolean }> {
+export function wechatDumpAndExport(wxid: string): Promise<{ urlsTxt: string; count: number; stageDetail: string; usedCachedKey: boolean }> {
   return invoke('wechat_dump_and_export', { wxid });
 }
 
@@ -121,14 +208,4 @@ export async function wechatGrantBookmark(): Promise<string> {
   const path = await open({ directory: true, multiple: false, title: '授权访问微信数据（选择微信数据目录）' });
   if (!path || typeof path !== 'string') throw new Error('未选择目录');
   return invoke<string>('wechat_grant_bookmark', { path });
-}
-
-export async function ignorePair(expectedRoot: string, assetA: string, assetB: string): Promise<import('./types').ManagementSnapshot> {
-  return invoke('ignore_pair', { expectedRoot, assetA, assetB });
-}
-
-export async function exportAssets(expectedRoot: string, assetIds: string[], nameMap: Record<string, string>): Promise<import('./types').ExportSummary | null> {
-  const path = await open({ directory: true, multiple: false, title: '选择导出位置（将新建导出文件夹）' });
-  if (!path) return null;
-  return invoke('export_assets', { expectedRoot, assetIds, targetParent: path, nameMap });
 }

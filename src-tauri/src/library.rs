@@ -1,3 +1,6 @@
+#[path = "deletion.rs"]
+mod deletion;
+pub use deletion::DeleteResult;
 use fs2::FileExt;
 use image::{AnimationDecoder, ImageDecoder};
 use serde::{Deserialize, Serialize};
@@ -178,6 +181,33 @@ fn inspect(bytes: &[u8]) -> Result<(String, u32, u32), String> {
     Ok((extension.into(), decoded.width(), decoded.height()))
 }
 
+fn expand_import(path: &Path, out: &mut Vec<PathBuf>, failed: &mut Vec<ImportFailure>, recursive: bool) -> Result<(), String> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    if name.starts_with('.') { return Ok(()); }
+    let meta = fs::symlink_metadata(path).map_err(err)?;
+    if meta.file_type().is_symlink() { return Err("不导入符号链接".into()); }
+    if meta.is_dir() {
+        let ext = path.extension().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+        if matches!(ext.as_str(), "app" | "bundle" | "framework" | "plugin" | "photoslibrary" | "photolibrary" | "rtfd" | "pages" | "numbers" | "key" | "stickerpack")
+            || name == "cache" || path.join("library.json").is_file() {
+            return Ok(());
+        }
+        #[cfg(target_os = "macos")]
+        if crate::native::is_package(path)? { return Ok(()); }
+        let mut entries = fs::read_dir(path).map_err(err)?.map(|e| e.map(|v| v.path())).collect::<Result<Vec<_>, _>>().map_err(err)?;
+        entries.sort();
+        for child in entries {
+            if let Err(error) = expand_import(&child, out, failed, true) {
+                failed.push(ImportFailure { name: child.to_string_lossy().into_owned(), error });
+            }
+        }
+    } else if meta.is_file() {
+        let ext = path.extension().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+        if !recursive || matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") { out.push(path.to_path_buf()); }
+    }
+    Ok(())
+}
+
 impl Library {
     pub fn create(parent: &Path) -> Result<Self, String> {
         let parent = parent.canonicalize().map_err(err)?;
@@ -210,9 +240,10 @@ impl Library {
             return Err("资料库必须是实际文件夹，不能是符号链接".into());
         }
         let root = root.canonicalize().map_err(err)?;
+        let lock = Self::acquire_lock(&root)?;
+        Self::recover_deletion(&root)?;
         Self::check_assets(&root)?;
         regular_file(&root.join("library.json"))?;
-        let lock = Self::acquire_lock(&root)?;
         let manifest: Manifest = serde_json::from_slice(&read_bounded(&root.join("library.json"))?)
             .map_err(|e| format!("资料库索引损坏，未覆盖原文件：{e}"))?;
         Self::validate(&root, &manifest)?;
@@ -326,7 +357,13 @@ impl Library {
         }
         Self::check_assets(&self.root)?;
         let mut report = ImportReport::default();
+        let mut expanded = Vec::new();
         for path in paths {
+            if let Err(error) = expand_import(&path, &mut expanded, &mut report.failed, false) {
+                report.failed.push(ImportFailure { name: path.to_string_lossy().into_owned(), error });
+            }
+        }
+        for path in expanded {
             let name = path
                 .file_name()
                 .unwrap_or_default()
@@ -403,11 +440,14 @@ impl Library {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // Build a tiny animation from our own lossless frames, with no user assets.
-    fn animated_webp() -> Vec<u8> {
+    pub(crate) fn animated_webp() -> Vec<u8> {
+        animated_webp_colors(&[[255, 0, 0, 255], [0, 0, 255, 255]])
+    }
+    pub(crate) fn animated_webp_colors(colors: &[[u8; 4]]) -> Vec<u8> {
         fn chunk(target: &mut Vec<u8>, name: &[u8; 4], data: &[u8]) {
             target.extend_from_slice(name);
             target.extend_from_slice(&(data.len() as u32).to_le_bytes());
@@ -418,11 +458,11 @@ mod tests {
         }
         let mut body = b"WEBP".to_vec();
         // Animation flag, 2×3 canvas (stored as width/height minus one).
-        chunk(&mut body, b"VP8X", &[2, 0, 0, 0, 1, 0, 0, 2, 0, 0]);
+        chunk(&mut body, b"VP8X", &[if colors.iter().any(|c| c[3] < 255) { 18 } else { 2 }, 0, 0, 0, 1, 0, 0, 2, 0, 0]);
         chunk(&mut body, b"ANIM", &[0; 6]);
-        for color in [[255, 0, 0, 255], [0, 0, 255, 255]] {
+        for color in colors {
             let mut encoded = Cursor::new(Vec::new());
-            image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(2, 3, image::Rgba(color)))
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(2, 3, image::Rgba(*color)))
                 .write_to(&mut encoded, image::ImageFormat::WebP)
                 .unwrap();
             // Full-canvas, 100 ms frame, replace rather than blend.
@@ -434,6 +474,31 @@ mod tests {
         bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
         bytes.extend(body);
         bytes
+    }
+
+    #[test]
+    fn directory_import_expands_images_and_skips_hidden_packages_and_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib = Library::create(dir.path()).unwrap();
+        let input = dir.path().join("input");
+        for folder in ["nested", ".hidden", "Test.app", "cache"] {
+            fs::create_dir_all(input.join(folder)).unwrap();
+        }
+        for (i, name) in ["nested/UPPER.PNG", ".hidden/a.png", "Test.app/a.png", "cache/a.png", ".secret.png"].iter().enumerate() {
+            image::RgbaImage::from_pixel(2, 2, image::Rgba([i as u8, 0, 0, 255])).save(input.join(name)).unwrap();
+        }
+        fs::write(input.join("notes.txt"), b"ignore").unwrap();
+        let report = lib.import_files(vec![input.clone()], "本地".into()).unwrap();
+        assert_eq!(report.added, 1);
+        assert!(report.failed.is_empty());
+        assert_eq!(lib.snapshot().items[0].name, "UPPER.PNG");
+        assert!(lib.import_files(vec![input.clone()], "unknown".into()).is_err());
+        #[cfg(unix)] {
+            std::os::unix::fs::symlink(input.join("nested/UPPER.PNG"), input.join("linked.png")).unwrap();
+            let report = lib.import_files(vec![input], "本地".into()).unwrap();
+            assert_eq!(report.duplicates, 1);
+            assert_eq!(report.failed.len(), 1);
+        }
     }
 
     #[test]

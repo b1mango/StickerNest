@@ -21,6 +21,12 @@ export interface ImportReport {
   failed: { name: string; error: string }[];
 }
 
+export interface ImportResult {
+  snapshot: Snapshot;
+  report: ImportReport;
+  previewWarnings: string[];
+}
+
 export const SOURCE_LABELS: Record<string, string> = {
   本地: '本地文件',
   微信: '微信',
@@ -58,6 +64,8 @@ export interface ManagementSnapshot {
   groups: VersionGroup[];
   ignoredPairs: [string, string][];
   collections: string[];
+  favorites?: Record<string, number>;
+  recent?: Record<string, number>;
 }
 
 export interface AnimationPair {
@@ -89,4 +97,16 @@ export interface BackupSummary {
   assetCount: number;
   totalBytes: number;
   includesManagement: boolean;
+}
+
+export interface ClipboardResult {
+  count: number;
+  converted: number;
+  oversized: string[];
+}
+
+export interface DeleteResult {
+  snapshot: Snapshot;
+  management: ManagementSnapshot;
+  deleted: number;
 }

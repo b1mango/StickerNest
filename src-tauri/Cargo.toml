@@ -1,6 +1,6 @@
 [package]
 name = "stickernest"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 default-run = "stickernest"
 
@@ -10,6 +10,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
+tauri-plugin-drag = "2.1.1"
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -25,3 +27,8 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 [lib]
 name = "stickernest_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSString", "NSURL", "NSFileManager", "NSError"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem", "NSWorkspace"] }

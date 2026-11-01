@@ -73,6 +73,10 @@ pub struct ManagementSnapshot {
     /// brand-new empty collection can be built up afterwards.
     #[serde(default)]
     pub collections: Vec<String>,
+    #[serde(default)]
+    pub favorites: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub recent: BTreeMap<String, u64>,
 }
 impl Default for ManagementSnapshot {
     fn default() -> Self {
@@ -86,6 +90,8 @@ impl Default for ManagementSnapshot {
             groups: vec![],
             ignored_pairs: vec![],
             collections: vec![],
+            favorites: BTreeMap::new(),
+            recent: BTreeMap::new(),
         }
     }
 }
@@ -146,6 +152,19 @@ fn metadata_valid(m: &AssetMetadata) -> bool {
                 && list.iter().collect::<HashSet<_>>().len() == list.len()
         })
 }
+fn unix_seconds() -> Result<u64, String> {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|v| v.as_secs()).map_err(|e| e.to_string())
+}
+fn trim_recent(recent: &mut BTreeMap<String, u64>, used: &[String]) {
+    let priority: BTreeMap<_, _> = used.iter().enumerate().map(|(i, id)| (id, i)).collect();
+    let mut ordered: Vec<_> = recent.iter().map(|(id, at)| (id.clone(), *at)).collect();
+    ordered.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| priority.get(&b.0).cmp(&priority.get(&a.0))).then_with(|| a.0.cmp(&b.0)));
+    for (id, _) in ordered.into_iter().skip(200) { recent.remove(&id); }
+}
+fn collection_names(m: &ManagementSnapshot) -> HashSet<String> {
+    m.collections.iter().chain(m.metadata.values().flat_map(|v| &v.collections))
+        .chain(m.groups.iter().flat_map(|g| &g.collections)).cloned().collect()
+}
 impl Library {
     fn management_path(&self) -> PathBuf {
         PathBuf::from(self.snapshot().root).join("management.json")
@@ -157,12 +176,14 @@ impl Library {
             Ok(())
         }
     }
-    fn validate_management(&self, m: &ManagementSnapshot) -> Result<(), String> {
+    pub(crate) fn validate_management(&self, m: &ManagementSnapshot) -> Result<(), String> {
         if m.version != 1
             || m.metadata.len() > MAX_RECORDS
             || m.references.len() > MAX_RECORDS
             || m.accounts.len() > 1000
             || m.batches.len() > MAX_RECORDS
+            || m.favorites.len() > MAX_RECORDS
+            || m.recent.len() > 200
             || m.trash.len() > MAX_RECORDS
             || m.groups.len() > MAX_RECORDS
             || m.ignored_pairs.len() > MAX_RECORDS
@@ -185,7 +206,7 @@ impl Library {
             }
             self.asset_path(id)?;
         }
-        for (id, at) in &m.trash {
+        for (id, at) in m.trash.iter().chain(&m.favorites).chain(&m.recent) {
             if !hash_valid(id) || *at == 0 {
                 return Err("管理文件回收站记录无效".into());
             }
@@ -273,7 +294,7 @@ impl Library {
         self.validate_management(&m)?;
         Ok(m)
     }
-    fn write_management(&self, m: &ManagementSnapshot) -> Result<(), String> {
+    pub(crate) fn write_management(&self, m: &ManagementSnapshot) -> Result<(), String> {
         self.validate_management(m)?;
         let path = self.management_path();
         match fs::symlink_metadata(&path) {
@@ -477,6 +498,71 @@ impl Library {
         self.write_management(&m)?;
         Ok(m)
     }
+    pub fn set_favorite(
+        &self, expected_root: &str, asset_ids: Vec<String>, favorite: bool,
+    ) -> Result<ManagementSnapshot, String> {
+        self.check_expected_root(expected_root)?;
+        self.validate_selection(&asset_ids)?;
+        let mut m = self.get_management()?;
+        let now = unix_seconds()?;
+        for id in asset_ids {
+            if favorite { m.favorites.entry(id).or_insert(now); }
+            else { m.favorites.remove(&id); }
+        }
+        self.write_management(&m)?;
+        Ok(m)
+    }
+
+    pub fn mark_used(
+        &self, expected_root: &str, asset_ids: Vec<String>,
+    ) -> Result<ManagementSnapshot, String> {
+        self.check_expected_root(expected_root)?;
+        self.validate_selection(&asset_ids)?;
+        let mut m = self.get_management()?;
+        let now = unix_seconds()?;
+        for id in &asset_ids { m.recent.insert(id.clone(), now); }
+        trim_recent(&mut m.recent, &asset_ids);
+        self.write_management(&m)?;
+        Ok(m)
+    }
+
+    pub fn rename_collection(
+        &self, expected_root: &str, from: String, to: String,
+    ) -> Result<ManagementSnapshot, String> {
+        self.check_expected_root(expected_root)?;
+        let to = to.trim().to_string();
+        if !text_valid(&to, 50, false) {
+            return Err("合集名称为 1–50 字，不能含控制字符".into());
+        }
+        let mut m = self.get_management()?;
+        let names = collection_names(&m);
+        if !names.contains(&from) { return Err("合集不存在".into()); }
+        if names.contains(&to) { return Err("目标合集名称已存在".into()); }
+        for name in &mut m.collections { if *name == from { *name = to.clone(); } }
+        if !m.collections.contains(&to) { m.collections.push(to.clone()); }
+        for meta in m.metadata.values_mut() {
+            for name in &mut meta.collections { if *name == from { *name = to.clone(); } }
+        }
+        for group in &mut m.groups {
+            for name in &mut group.collections { if *name == from { *name = to.clone(); } }
+        }
+        self.write_management(&m)?;
+        Ok(m)
+    }
+
+    pub fn delete_collection(
+        &self, expected_root: &str, name: String,
+    ) -> Result<ManagementSnapshot, String> {
+        self.check_expected_root(expected_root)?;
+        let mut m = self.get_management()?;
+        if !collection_names(&m).contains(&name) { return Err("合集不存在".into()); }
+        m.collections.retain(|v| v != &name);
+        for meta in m.metadata.values_mut() { meta.collections.retain(|v| v != &name); }
+        for group in &mut m.groups { group.collections.retain(|v| v != &name); }
+        self.write_management(&m)?;
+        Ok(m)
+    }
+
     /// Logical trash only: asset files and library.json stay untouched.
     pub fn set_trash(
         &self,
@@ -806,6 +892,76 @@ mod tests {
         )
         .unwrap();
     }
+    #[test]
+    fn favorites_and_recent_persist_and_reject_invalid_selections() {
+        let (_dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        let m = lib.set_favorite(&root, ids.clone(), true).unwrap();
+        assert_eq!(m.favorites.len(), 2);
+        assert!(m.favorites.values().all(|at| *at > 0));
+        assert_eq!(lib.set_favorite(&root, vec![ids[0].clone()], false).unwrap().favorites.len(), 1);
+        let m = lib.mark_used(&root, ids.clone()).unwrap();
+        assert_eq!(m.recent.len(), 2);
+        let before = fs::read(lib.management_path()).unwrap();
+        assert!(lib.set_favorite("wrong-root", ids.clone(), true).is_err());
+        assert!(lib.set_favorite(&root, vec![ids[0].clone(), "f".repeat(64)], true).is_err());
+        assert!(lib.mark_used(&root, vec![]).is_err());
+        assert!(lib.mark_used("wrong-root", ids.clone()).is_err());
+        assert!(lib.mark_used(&root, vec![ids[0].clone(), "f".repeat(64)]).is_err());
+        assert_eq!(before, fs::read(lib.management_path()).unwrap());
+        drop(lib);
+        let m = Library::open(Path::new(&root)).unwrap().get_management().unwrap();
+        assert_eq!(m.recent.len(), 2);
+        assert_eq!(m.favorites.len(), 1);
+    }
+
+    #[test]
+    fn recent_keeps_latest_200_and_old_management_defaults_to_empty_maps() {
+        let mut recent = (0..205).map(|i| (format!("{i:064x}"), i + 1)).collect();
+        trim_recent(&mut recent, &[]);
+        assert_eq!(recent.len(), 200);
+        assert_eq!(*recent.values().min().unwrap(), 6);
+        let newest = "f".repeat(64);
+        recent.values_mut().for_each(|at| *at = 205);
+        recent.insert(newest.clone(), 205);
+        trim_recent(&mut recent, &[newest.clone()]);
+        assert_eq!(recent.len(), 200);
+        assert!(recent.contains_key(&newest));
+        let (_dir, lib, _) = fixture();
+        let old = serde_json::json!({"version":1,"metadata":{},"accounts":[],"references":[],"batches":[]});
+        fs::write(lib.management_path(), old.to_string()).unwrap();
+        let m = lib.get_management().unwrap();
+        assert_eq!(m.version, 1);
+        assert!(m.favorites.is_empty() && m.recent.is_empty());
+    }
+
+    #[test]
+    fn collection_rename_and_delete_update_roster_metadata_and_groups() {
+        let (_dir, lib, ids) = fixture();
+        let root = lib.snapshot().root;
+        lib.add_collection_name(&root, "原合集".into(), ids.clone()).unwrap();
+        lib.add_collection_name(&root, "目标".into(), vec![]).unwrap();
+        lib.create_group(&root, ids.clone(), ids[0].clone(), vec![], vec!["原合集".into()]).unwrap();
+        let before = fs::read(lib.management_path()).unwrap();
+        for to in ["", "目标", &"长".repeat(51)] {
+            assert!(lib.rename_collection(&root, "原合集".into(), to.into()).is_err());
+        }
+        assert!(lib.rename_collection("wrong-root", "原合集".into(), "新合集".into()).is_err());
+        assert!(lib.rename_collection(&root, "不存在".into(), "新合集".into()).is_err());
+        assert!(lib.delete_collection("wrong-root", "原合集".into()).is_err());
+        assert_eq!(before, fs::read(lib.management_path()).unwrap());
+        let m = lib.rename_collection(&root, "原合集".into(), "新合集".into()).unwrap();
+        assert!(m.collections.contains(&"新合集".into()));
+        assert_eq!(m.metadata[&ids[0]].collections, vec!["新合集"]);
+        assert_eq!(m.groups[0].collections, vec!["新合集"]);
+        let m = lib.delete_collection(&root, "新合集".into()).unwrap();
+        assert_eq!(m.collections, vec!["目标"]);
+        assert!(m.metadata.values().all(|v| v.collections.is_empty()));
+        assert!(m.groups[0].collections.is_empty());
+        assert_eq!(lib.snapshot().items.len(), 2);
+        assert!(lib.delete_collection(&root, "新合集".into()).is_err());
+    }
+
     #[test]
     fn create_collection_and_members_commit_together() {
         let (_dir, lib, ids) = fixture();

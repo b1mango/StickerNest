@@ -79,7 +79,7 @@ export function CollectDialog({ root, accounts, onSnapshot, onManagement, onErro
     <dialog className="detail-dialog collect-dialog" ref={dialog} onClose={() => { if (!dialog.current?.open) onClose(); }} aria-labelledby="collect-title" onCancel={event => { if (busy) event.preventDefault(); }}>
       <div className="detail-heading"><span className="eyebrow">抖音采集</span><button className="icon-button" autoFocus disabled={busy} onClick={() => dialog.current?.close()} aria-label="关闭采集"><X size={20} /></button></div>
       <div className="detail-content collect-content">
-        <h2 id="collect-title">采集抖音收藏表情</h2>
+        <h2 id="collect-title">从抖音导入收藏表情</h2>
         {dialogError ? <p className="field-error" role="alert">{dialogError}</p> : null}
         {state.phase === 'idle' ? <>
           <p className="field-hint">{CHROME_HINT}</p>

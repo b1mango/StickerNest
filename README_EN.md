@@ -11,22 +11,18 @@ A local-first macOS app for collecting, browsing, and organizing stickers.
 
 ## Features
 
-- Import local stickers, with WeChat and Douyin import workflows.
-- Browse large icons, small icons, lists, or a gallery; search names and tags.
-- Organize collections, rename and tag stickers individually or in batches.
+- Import from WeChat, Douyin, or local folders, archived by source; drop images or folders onto the window to import.
+- Press ⌘C or drag a sticker straight into a WeChat chat; Douyin WebP files are converted to WeChat-friendly GIF / PNG automatically.
+- Grid and list views, name search, favorites, recently used, and Space for Quick Look.
+- Organize with collections and batch rename; right-click or drag onto a sidebar collection to file stickers.
 - Review similar stickers and choose which to keep; restore items from Trash.
-- Export selected originals, back up libraries, and restore backups.
+- Export selected originals, back up and restore libraries; follows the system light / dark appearance.
 
 ## Installation
 
-Download the [Apple Silicon DMG](https://github.com/b1mango/StickerNest/releases/download/v0.0.1/StickerNest_0.0.1_aarch64.dmg), open it, and drag StickerNest into Applications.
+Download the [Apple Silicon DMG](https://github.com/b1mango/StickerNest/releases/download/v0.0.2/StickerNest_0.0.2_aarch64.dmg), open it, and drag StickerNest into Applications.
 
-Open an existing `StickerNest Library` folder or restore a backup. To create your first library from source, use the command below with your sticker folder:
-
-```sh
-cargo run --manifest-path src-tauri/Cargo.toml --bin import-local -- \
-  --input /path/to/stickers --library ~/StickerNest --create --source 本地
-```
+On first launch, create a new library, open an existing `StickerNest Library` folder, or restore a backup. The last library reopens automatically.
 
 ## Development
 
