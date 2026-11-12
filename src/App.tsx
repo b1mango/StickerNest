@@ -357,6 +357,18 @@ export default function App() {
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
 
+  // Grid thumbnails: (re)generate whenever the library or its size changes; bump to retry tiles that fell back.
+  const [thumbVersion, setThumbVersion] = useState(0);
+  const itemCount = library?.items.length ?? 0;
+  useEffect(() => {
+    if (!api.isDesktop || !root || !itemCount) return;
+    let active = true;
+    api.ensureThumbnails(root)
+      .then(report => { if (active && report.created) setThumbVersion(version => version + 1); })
+      .catch(reason => console.warn('缩略图生成失败', reason));
+    return () => { active = false; };
+  }, [root, itemCount]);
+
   const [welcomeRecent, setWelcomeRecent] = useState<string[]>([]);
   useEffect(() => {
     if (!library && !lib.loading) api.recentLibraries().then(setWelcomeRecent, () => setWelcomeRecent([]));
@@ -439,7 +451,7 @@ export default function App() {
               }} />
           </div>
         ) : (
-          <StickerGrid items={items} root={root} index={index} view={prefs.view} tileSize={prefs.tileSize}
+          <StickerGrid items={items} root={root} index={index} view={prefs.view} tileSize={prefs.tileSize} thumbVersion={thumbVersion}
             selection={selection} resetKey={`${nav.kind}:${'value' in nav ? nav.value : ''}:${query}:${prefs.sort}`}
             onSelection={setSelection} onColumns={setColumns} onOpen={act.quickLook}
             onContextMenu={openGridMenu} onDragOut={ids => void dragOut(ids)}

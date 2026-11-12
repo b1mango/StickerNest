@@ -11,7 +11,7 @@ use std::{
     fs::{self, File},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{Child, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -483,9 +483,50 @@ pub struct DouyinAccount {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DouyinProgress {
     stage: String,
     message: String,
+    done: Option<u64>,
+    total: Option<u64>,
+}
+
+fn read_douyin_progress(
+    child: &mut Child,
+    on_progress: &mut impl FnMut(String, String, Option<u64>, Option<u64>) -> Result<(), String>,
+) -> Result<(VecDeque<String>, Option<String>), String> {
+    let mut stderr = BufReader::new(child.stderr.take().expect("采集进程的 stderr 已设置为管道"));
+    let mut errors = VecDeque::new();
+    let mut progress_error = None;
+    loop {
+        let mut line = String::new();
+        match stderr.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {},
+            Err(error) => return Err(format!("读取采集进度失败：{error}")),
+        }
+        let line = line.trim_end_matches(['\r', '\n']);
+        if let Some(json) = line.strip_prefix("PROGRESS ") {
+            match serde_json::from_str::<DouyinProgress>(json) {
+                Ok(progress) => {
+                    if let Err(error) = on_progress(progress.stage, progress.message, progress.done, progress.total) {
+                        if progress_error.is_none() {
+                            progress_error = Some(error);
+                        }
+                    }
+                }
+                Err(error) => {
+                    progress_error.get_or_insert_with(|| format!("采集进度格式无效：{error}"));
+                }
+            }
+        } else {
+            if errors.len() == 8 {
+                errors.pop_front();
+            }
+            errors.push_back(line.chars().rev().take(600).collect::<String>().chars().rev().collect::<String>());
+        }
+    }
+    Ok((errors, progress_error))
 }
 
 /// Stage 1 runs without holding the library lock; assets are imported in stage 2.
@@ -493,7 +534,7 @@ pub fn collect_douyin_fetch(
     root: &Path,
     runtime: &CollectionRuntime,
     profile: &Path,
-    mut on_progress: impl FnMut(String, String) -> Result<(), String>,
+    mut on_progress: impl FnMut(String, String, Option<u64>, Option<u64>) -> Result<(), String>,
 ) -> Result<CollectStageResult, String> {
     let downloads = root.join("downloads");
     fs::create_dir_all(&downloads).map_err(|e| format!("无法创建采集目录：{e}"))?;
@@ -511,43 +552,9 @@ pub fn collect_douyin_fetch(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("无法启动内置采集运行时：{e}"))?;
-    let mut stderr = BufReader::new(child.stderr.take().expect("采集进程的 stderr 已设置为管道"));
-    let mut errors = VecDeque::new();
-    let mut progress_error = None;
-    loop {
-        let mut line = String::new();
-        match stderr.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => {},
-            Err(error) => {
-                // Closing the pipe lets the collector finish its own browser cleanup.
-                drop(stderr);
-                child.wait().map_err(|e| format!("等待采集进程失败：{e}"))?;
-                return Err(format!("读取采集进度失败：{error}"));
-            }
-        }
-        let line = line.trim_end_matches(['\r', '\n']);
-        if let Some(json) = line.strip_prefix("PROGRESS ") {
-            match serde_json::from_str::<DouyinProgress>(json) {
-                Ok(progress) => {
-                    if let Err(error) = on_progress(progress.stage, progress.message) {
-                        if progress_error.is_none() {
-                            progress_error = Some(error);
-                        }
-                    }
-                }
-                Err(error) => {
-                    progress_error.get_or_insert_with(|| format!("采集进度格式无效：{error}"));
-                }
-            }
-        } else {
-            if errors.len() == 8 {
-                errors.pop_front();
-            }
-            errors.push_back(line.chars().rev().take(600).collect::<String>().chars().rev().collect::<String>());
-        }
-    }
+    let progress = read_douyin_progress(&mut child, &mut on_progress);
     let status = child.wait().map_err(|e| format!("等待采集进程失败：{e}"))?;
+    let (errors, progress_error) = progress?;
     if !status.success() {
         let detail = errors.into_iter().collect::<Vec<_>>().join("\n");
         let detail = detail.chars().rev().take(600).collect::<String>();
@@ -565,16 +572,28 @@ pub fn collect_douyin_fetch(
     if stickers.is_empty() {
         return Err("收藏清单为空".into());
     }
-    let output = runtime.python()
+    let mut child = runtime.python()
         .arg(runtime.script("download_douyin.py"))
         .arg(&list_path)
         .arg(&downloads)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("无法启动内置下载运行时：{e}"))?;
-    if !output.status.success() {
+    let mut stdout = child.stdout.take().expect("下载进程的 stdout 已设置为管道");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let progress = read_douyin_progress(&mut child, &mut on_progress);
+    let status = child.wait().map_err(|e| format!("等待下载进程失败：{e}"))?;
+    let stdout = stdout_reader.join().map_err(|_| "读取下载输出线程失败".to_string())?
+        .map_err(|e| format!("读取下载输出失败：{e}"))?;
+    let (errors, progress_error) = progress?;
+    if !status.success() {
         // The downloader prints per-item and summary failures to stdout.
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = errors.into_iter().collect::<Vec<_>>().join("\n");
+        let stdout = String::from_utf8_lossy(&stdout);
         let detail = if stderr.trim().is_empty() {
             stdout.trim().to_string()
         } else if stdout.trim().is_empty() {
@@ -583,6 +602,9 @@ pub fn collect_douyin_fetch(
             format!("{}\n{}", stderr.trim(), stdout.trim())
         };
         return Err(format!("资源下载未完成：{}", detail.chars().take(600).collect::<String>()));
+    }
+    if let Some(error) = progress_error {
+        return Err(format!("发送下载进度失败：{error}"));
     }
     Ok(CollectStageResult {
         stage: "fetch".into(),
@@ -675,21 +697,42 @@ impl Library {
 
     /// Stage 2: import the staged originals and return the report path for
     /// account mapping (import_provenance handles the account step in the UI).
-    pub fn collect_douyin_import(&mut self) -> Result<(crate::library::ImportReport, PathBuf), String> {
+    pub fn collect_douyin_import(
+        &mut self,
+        on_progress: impl FnMut(usize, usize),
+    ) -> Result<(crate::library::ImportReport, PathBuf), String> {
         let downloads = PathBuf::from(self.snapshot().root).join("downloads");
         let originals = downloads.join("originals");
         let mut paths: Vec<PathBuf> = fs::read_dir(&originals)
             .map_err(|e| format!("下载原件目录不存在，请先执行采集：{e}"))?
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .collect();
+        // Import only what the latest download report lists, so stale files from an
+        // earlier interrupted run (e.g. truncated .bin) are not re-imported.
+        if let Some(listed) = reported_originals(&downloads.join("report.json")) {
+            paths.retain(|path| path.file_name().and_then(|n| n.to_str()).is_some_and(|n| listed.contains(n)));
+        }
         paths.sort();
         if paths.is_empty() {
             return Err("downloads 中没有原件，请先执行采集".into());
         }
         // Safe local import of files this app downloaded itself.
-        let report = self.import_files(paths, "抖音".into())?;
+        let report = self.import_files_with_progress(paths, "抖音".into(), on_progress)?;
         Ok((report, downloads.join("report.json")))
     }
+}
+
+/// File names under originals/ referenced by non-failed rows of the download
+/// report; `None` when the report has no item list (legacy or missing report).
+fn reported_originals(report: &Path) -> Option<std::collections::HashSet<String>> {
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(report).ok()?).ok()?;
+    let rows = value.get("items")?.as_array()?;
+    Some(rows.iter()
+        .filter(|row| row.get("status").and_then(|s| s.as_str()) != Some("failed"))
+        .filter_map(|row| row.get("file")?.as_str()?.strip_prefix("originals/"))
+        .filter(|name| !name.is_empty() && !name.contains('/'))
+        .map(str::to_owned)
+        .collect())
 }
 
 #[cfg(test)]
@@ -906,8 +949,10 @@ mod tests {
             .save(originals.join("b.png"))
             .unwrap();
         fs::write(root.join("downloads").join("report.json"), b"{}").unwrap();
-        let (report, report_path) = lib.collect_douyin_import().unwrap();
+        let mut progress = Vec::new();
+        let (report, report_path) = lib.collect_douyin_import(|done, total| progress.push((done, total))).unwrap();
         assert_eq!(report.added, 2);
+        assert_eq!(progress, vec![(1, 2), (2, 2)]);
         assert!(report_path.ends_with("downloads/report.json"));
         assert_eq!(lib.snapshot().items.len(), 4);
         assert!(lib
@@ -915,10 +960,23 @@ mod tests {
             .items
             .iter()
             .all(|item| item.sources.contains(&"抖音".to_string()) || item.sources.contains(&"本地".to_string())));
+        // With an item list, only reported files are imported; stale leftovers are ignored.
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([7, 7, 7, 255]))
+            .save(originals.join("c.png"))
+            .unwrap();
+        fs::write(originals.join("stale.bin"), b"truncated").unwrap();
+        fs::write(root.join("downloads").join("report.json"), serde_json::to_vec(&serde_json::json!({
+            "items": [
+                { "status": "verified", "file": "originals/c.png" },
+                { "status": "failed", "error": "network_failure" },
+            ]
+        })).unwrap()).unwrap();
+        let (report, _) = lib.collect_douyin_import(|_, _| {}).unwrap();
+        assert_eq!((report.added, report.duplicates, report.failed.len()), (1, 0, 0));
         // Missing originals is a clear error, not an empty success.
         let dir2 = tempfile::tempdir().unwrap();
         let mut lib2 = Library::create(dir2.path()).unwrap();
-        assert!(lib2.collect_douyin_import().is_err());
+        assert!(lib2.collect_douyin_import(|_, _| {}).is_err());
         let _ = dir;
     }
     #[cfg(unix)]
@@ -946,7 +1004,7 @@ done
 printf '%s\n' 'PROGRESS {"stage":"launching","message":"正在启动"}' >&2
 printf '[{"id_str":"1","animate_url":{"url_list":["https://p3-im-emoticon-sign.byteimg.com/a.webp"]}},{"id_str":"2","static_url":{"url_list":["https://p3-im-emoticon-sign.byteimg.com/b.webp"]}}]' > "$out"
 printf '{"uid":"123","nickname":"测试账号"}' > "$account"
-printf '%s\n' 'PROGRESS {"stage":"collecting","message":"已读取 2 项，共 2 项"}' >&2
+printf '%s\n' 'PROGRESS {"stage":"collecting","message":"已读取 2 项，共 2 项","done":2,"total":2}' >&2
 "##,
         )
         .unwrap();
@@ -964,7 +1022,14 @@ printf '%s\n' 'PROGRESS {"stage":"collecting","message":"已读取 2 项，共 2
         // python shim needs to actually create originals; use printf-based png.
         fs::write(
             &python_shim,
-            "#!/bin/sh\ndest=\"$5\"\nmkdir -p \"$dest/originals\"\ntouch \"$dest/report.json\"\nexit 0\n",
+            r##"#!/bin/sh
+dest="$5"
+mkdir -p "$dest/originals"
+touch "$dest/report.json"
+printf '%s\n' 'PROGRESS {"stage":"downloading","message":"已下载 1/2","done":1,"total":2}' >&2
+printf '%s\n' 'PROGRESS {"stage":"downloading","message":"已下载 2/2","done":2,"total":2}' >&2
+exit 0
+"##,
         )
         .unwrap();
         fs::set_permissions(&python_shim, fs::metadata(&node_shim).unwrap().permissions()).unwrap();
@@ -975,8 +1040,8 @@ printf '%s\n' 'PROGRESS {"stage":"collecting","message":"已读取 2 项，共 2
         let runtime = CollectionRuntime::fixture(&shim);
         let profile = dir.path().join("profile");
         let mut progress = Vec::new();
-        let result = collect_douyin_fetch(&root, &runtime, &profile, |stage, message| {
-            progress.push((stage, message));
+        let result = collect_douyin_fetch(&root, &runtime, &profile, |stage, message, done, total| {
+            progress.push((stage, message, done, total));
             Ok(())
         });
         let result = result.unwrap();
@@ -986,8 +1051,10 @@ printf '%s\n' 'PROGRESS {"stage":"collecting","message":"已读取 2 项，共 2
         assert_eq!(account.uid, "123");
         assert_eq!(account.nickname, "测试账号");
         assert_eq!(progress, vec![
-            ("launching".into(), "正在启动".into()),
-            ("collecting".into(), "已读取 2 项，共 2 项".into()),
+            ("launching".into(), "正在启动".into(), None, None),
+            ("collecting".into(), "已读取 2 项，共 2 项".into(), Some(2), Some(2)),
+            ("downloading".into(), "已下载 1/2".into(), Some(1), Some(2)),
+            ("downloading".into(), "已下载 2/2".into(), Some(2), Some(2)),
         ]);
         assert!(root.join("downloads/stickers.json").exists());
 
@@ -997,12 +1064,39 @@ printf '%s\n' '请求失败：网络不可用' >&2
 exit 1
 "##).unwrap();
         let mut failure_progress = Vec::new();
-        let error = collect_douyin_fetch(&root, &runtime, &profile, |stage, message| {
-            failure_progress.push((stage, message));
+        let error = collect_douyin_fetch(&root, &runtime, &profile, |stage, message, done, total| {
+            failure_progress.push((stage, message, done, total));
             Ok(())
         }).unwrap_err();
-        assert_eq!(failure_progress, vec![("waiting-login".into(), "等待登录".into())]);
+        assert_eq!(failure_progress, vec![("waiting-login".into(), "等待登录".into(), None, None)]);
         assert!(error.contains("请求失败：网络不可用"));
+        assert!(!error.contains("PROGRESS"));
+
+        fs::write(&node_shim, r##"#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --out) out="$2"; shift 2 ;;
+    --account-out) account="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '[{"id_str":"1"}]' > "$out"
+printf 'null' > "$account"
+"##).unwrap();
+        fs::write(&python_shim, r##"#!/bin/sh
+printf '%s\n' 'PROGRESS {"stage":"downloading","message":"已下载 1/1","done":1,"total":1}' >&2
+printf '%s\n' '下载错误详情' >&2
+printf '%s\n' '下载摘要' 
+exit 1
+"##).unwrap();
+        let mut download_progress = Vec::new();
+        let error = collect_douyin_fetch(&root, &runtime, &profile, |stage, message, done, total| {
+            download_progress.push((stage, message, done, total));
+            Ok(())
+        }).unwrap_err();
+        assert_eq!(download_progress, vec![("downloading".into(), "已下载 1/1".into(), Some(1), Some(1))]);
+        assert!(error.contains("下载错误详情"));
+        assert!(error.contains("下载摘要"));
         assert!(!error.contains("PROGRESS"));
     }
     #[test]

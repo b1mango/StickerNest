@@ -21,8 +21,8 @@ function argument(name) {
   return resolve(value);
 }
 
-function progress(stage, message) {
-  process.stderr.write(`PROGRESS ${JSON.stringify({ stage, message })}\n`);
+function progress(stage, message, counts = {}) {
+  process.stderr.write(`PROGRESS ${JSON.stringify({ stage, message, ...counts })}\n`);
 }
 
 function messageOf(error) {
@@ -465,7 +465,7 @@ async function collect(browser, firstPage, signal) {
       }
     }
     const count = total === undefined ? '总数未知' : `共 ${total} 项`;
-    progress('collecting', `已读取 ${stickers.length} 项，${count}`);
+    progress('collecting', `已读取 ${stickers.length} 项，${count}`, { done: stickers.length, total });
     if (list.is_completed) {
       if (total !== undefined && total !== stickers.length) {
         throw new Error(`收藏数量不一致：读取 ${stickers.length} 项，预期 ${total} 项，未写入清单`);

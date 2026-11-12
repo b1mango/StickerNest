@@ -14,12 +14,16 @@ const STEPS: { key: Step; label: string }[] = [
 ];
 /** Collector progress stages → the step they belong to. */
 const STAGE_STEP: Record<string, Step> = {
-  launching: 'browser', 'waiting-login': 'login', collecting: 'list', account: 'list', done: 'list',
+  launching: 'browser', 'waiting-login': 'login', collecting: 'list', account: 'list',
+  done: 'download', downloading: 'download', importing: 'download',
 };
+const BAR_LABEL: Record<string, string> = { collecting: '读取清单', downloading: '下载原图', importing: '导入资料库' };
+
+type Progress = { stage: string; done: number; total: number };
 
 type RunState =
   | { phase: 'idle' }
-  | { phase: 'running'; step: Step; note: string; waitingLogin: boolean }
+  | { phase: 'running'; step: Step; note: string; waitingLogin: boolean; bar?: Progress }
   | { phase: 'map'; reportPath: string; report: ImportReport }
   | { phase: 'done'; report: ImportReport; account: string };
 
@@ -47,13 +51,16 @@ export function CollectDialog({ root, accounts, onSnapshot, onManagement, onErro
   }, []);
 
   useEffect(() => {
-    const unlisten = listen<{ stage: string; message: string }>('douyin-progress', ({ payload }) => {
+    const unlisten = listen<{ stage: string; message: string; done?: number; total?: number }>('douyin-progress', ({ payload }) => {
       if (!mounted.current) return;
       setState(current => current.phase !== 'running' ? current : {
         phase: 'running',
         step: STAGE_STEP[payload.stage] ?? current.step,
         note: payload.message,
         waitingLogin: payload.stage === 'waiting-login',
+        bar: typeof payload.done === 'number' && typeof payload.total === 'number' && payload.total > 0
+          ? { stage: payload.stage, done: payload.done, total: payload.total }
+          : payload.stage === current.bar?.stage ? current.bar : undefined,
       });
     });
     return () => { void unlisten.then(stop => stop()); };
@@ -74,7 +81,7 @@ export function CollectDialog({ root, accounts, onSnapshot, onManagement, onErro
     try {
       const fetched = await collectDouyinFetch();
       if (!mounted.current) return;
-      setState({ phase: 'running', step: 'download', note: fetched.detail, waitingLogin: false });
+      setState({ phase: 'running', step: 'download', note: `${fetched.detail}，正在导入资料库…`, waitingLogin: false });
       const result = await collectDouyinImport();
       if (!mounted.current) return;
       onSnapshot(result.snapshot, result.previewWarnings.length ? `部分素材无法预览：${result.previewWarnings.join('；')}` : '');
@@ -130,6 +137,15 @@ export function CollectDialog({ root, accounts, onSnapshot, onManagement, onErro
               </li>
             ))}
           </ol>
+          {state.bar ? (
+            <div className="collect-progress">
+              <div className="collect-progress-label">
+                <span>{BAR_LABEL[state.bar.stage] ?? '进度'}</span>
+                <span>{state.bar.done} / {state.bar.total}</span>
+              </div>
+              <progress max={state.bar.total} value={state.bar.done} />
+            </div>
+          ) : null}
           <p role="status" className={state.waitingLogin ? 'collect-login' : 'field-hint'}>
             {state.waitingLogin ? '请在弹出的 Chrome 窗口里用抖音 App 扫码登录，登录后会自动继续（最多等待 5 分钟）。' : state.note}
           </p>

@@ -6,13 +6,16 @@ Usage: python3 scripts/download_douyin.py INPUT.json OUTPUT_DIRECTORY
 Originals and report.json stay local. Interrupted runs can be resumed.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import fcntl
 import hashlib
+import http.client
 import io
 import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 import time
 import urllib.error
@@ -54,7 +57,7 @@ class SameHostRedirect(urllib.request.HTTPRedirectHandler):
 def fetch(url, opener=None):
     check_url(url)
     opener = opener or urllib.request.build_opener(SameHostRedirect())
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             request = urllib.request.Request(url, headers={'User-Agent': 'StickerNest/0.1'})
             started = time.monotonic()
@@ -63,7 +66,8 @@ def fetch(url, opener=None):
                 if urllib.parse.urlsplit(response.geturl()).hostname != check_url(url).hostname:
                     raise DownloadError('cross_host_redirect')
                 length = response.headers.get('Content-Length')
-                if length and int(length) > MAX_BYTES:
+                length = int(length) if length is not None else None
+                if length is not None and length > MAX_BYTES:
                     raise DownloadError('resource_too_large')
                 chunks, size = [], 0
                 while True:
@@ -76,19 +80,21 @@ def fetch(url, opener=None):
                     if size > MAX_BYTES:
                         raise DownloadError('resource_too_large')
                     chunks.append(chunk)
+                if length is not None and size != length:
+                    raise OSError('content_length_mismatch')
                 if not size:
                     raise DownloadError('empty_resource')
                 return b''.join(chunks)
         except DownloadError:
             raise
         except urllib.error.HTTPError as exc:
-            if attempt == 0 and (exc.code == 429 or exc.code >= 500):
-                time.sleep(1)
+            if attempt < 2 and (exc.code == 429 or exc.code >= 500):
+                time.sleep(attempt + 1)
                 continue
             raise DownloadError('http_' + str(exc.code)) from None
-        except (OSError, ValueError):
-            if attempt == 0:
-                time.sleep(1)
+        except (OSError, ValueError, http.client.IncompleteRead):
+            if attempt < 2:
+                time.sleep(attempt + 1)
                 continue
             raise DownloadError('network_failure') from None
 
@@ -115,7 +121,7 @@ def inspect_bytes(data):
         return {'format': None, 'frames': None, 'extension': 'bin', 'status': 'pending_inspection'}
     except DownloadError:
         raise
-    except (OSError, ValueError, EOFError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+    except (OSError, ValueError, EOFError, IndexError, Image.DecompressionBombError, Image.DecompressionBombWarning):
         raise DownloadError('invalid_image') from None
 
 
@@ -155,7 +161,11 @@ def persist_original(directory, data, extension):
                 file.flush()
                 os.fsync(file.fileno())
             # Hard link is atomic and refuses to overwrite any existing file.
-            os.link(temporary, path)
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                if read_original(path) != data:
+                    raise DownloadError('existing_content_mismatch')
         finally:
             os.unlink(temporary)
     return name, digest
@@ -191,6 +201,60 @@ def collect(items, destination, fetcher=fetch):
         return _collect_locked(items, destination, fetcher)
 
 
+def _collect_item(item, originals, previous, fetcher):
+    row = {'id': item['id_str']}
+    try:
+        role, urls = select_resource(item)
+        row['resource_role'] = role
+        identity = json.dumps([item.get('hash'), (item.get(role) or {}).get('uri')], sort_keys=True)
+        row['resource_identity'] = hashlib.sha256(identity.encode()).hexdigest()
+        old = previous.get(row['id'], {})
+        digest = old.get('sha256', '')
+        extension = old.get('extension', '')
+        if (old.get('status') == 'verified' and old.get('resource_role') == role
+                and old.get('resource_identity') == row['resource_identity'] and re.fullmatch('[a-f0-9]{64}', digest)
+                and extension in {*EXTENSIONS.values(), 'bin'}
+                and (originals / (digest + '.' + extension)).exists()):
+            data = read_original(originals / (digest + '.' + extension))
+            if hashlib.sha256(data).hexdigest() != digest:
+                raise DownloadError('existing_content_mismatch')
+            resumed = True
+            try:
+                info = inspect_bytes(data)
+            except DownloadError as exc:
+                info = {'format': None, 'frames': None, 'extension': 'bin',
+                        'status': 'pending_inspection', 'inspection_error': str(exc)}
+        else:
+            data, info, resumed = None, None, False
+            for url in urls[:4]:
+                try:
+                    check_url(url)
+                    candidate = fetcher(url)
+                    if len(candidate) > MAX_BYTES:
+                        raise DownloadError('resource_too_large')
+                    try:
+                        candidate_info = inspect_bytes(candidate)
+                    except DownloadError as exc:
+                        candidate_info = {'format': None, 'frames': None, 'extension': 'bin',
+                                          'status': 'pending_inspection', 'inspection_error': str(exc)}
+                        if str(exc) == 'invalid_image':
+                            data, info = candidate, candidate_info
+                            continue
+                    data, info = candidate, candidate_info
+                    break
+                except DownloadError as exc:
+                    last_error = exc
+            if data is None:
+                raise last_error
+        name, digest = persist_original(originals, data, info['extension'])
+        row.update(info, file='originals/' + name, sha256=digest, size=len(data), resumed=resumed)
+    except DownloadError as exc:
+        row.update(status='failed', error=str(exc))
+    except (OSError, ValueError, TypeError, AttributeError):
+        row.update(status='failed', error='local_or_input_failure')
+    return row
+
+
 def _collect_locked(items, destination, fetcher):
     originals = destination / 'originals'
     if originals.is_symlink():
@@ -205,57 +269,23 @@ def _collect_locked(items, destination, fetcher):
     ids = {item['id_str'] for item in items}
     checkpoint = {key: value for key, value in previous.items() if key in ids}
     report = {'schema_version': 1, 'expected_items': len(items), 'items': [], 'counts': {}}
-    for item in items:
-        row = {'id': item['id_str']}
-        try:
-            role, urls = select_resource(item)
-            row['resource_role'] = role
-            identity = json.dumps([item.get('hash'), (item.get(role) or {}).get('uri')], sort_keys=True)
-            row['resource_identity'] = hashlib.sha256(identity.encode()).hexdigest()
-            old = previous.get(row['id'], {})
-            digest = old.get('sha256', '')
-            extension = old.get('extension', '')
-            if (old.get('resource_role') == role
-                    and old.get('resource_identity') == row['resource_identity'] and re.fullmatch('[a-f0-9]{64}', digest)
-                    and extension in {*EXTENSIONS.values(), 'bin'}
-                    and (originals / (digest + '.' + extension)).exists()):
-                data = read_original(originals / (digest + '.' + extension))
-                if hashlib.sha256(data).hexdigest() != digest:
-                    raise DownloadError('existing_content_mismatch')
-                resumed = True
-            else:
-                data, resumed = None, False
-                for url in urls[:4]:
-                    try:
-                        check_url(url)
-                        data = fetcher(url)
-                        break
-                    except DownloadError as exc:
-                        last_error = exc
-                if data is None:
-                    raise last_error
-            if len(data) > MAX_BYTES:
-                raise DownloadError('resource_too_large')
-            try:
-                info = inspect_bytes(data)
-            except DownloadError as exc:
-                info = {'format': None, 'frames': None, 'extension': 'bin',
-                        'status': 'pending_inspection', 'inspection_error': str(exc)}
-            name, digest = persist_original(originals, data, info['extension'])
-            row.update(info, file='originals/' + name, sha256=digest, size=len(data), resumed=resumed)
-        except DownloadError as exc:
-            row.update(status='failed', error=str(exc))
-        except (OSError, ValueError, TypeError, AttributeError):
-            row.update(status='failed', error='local_or_input_failure')
-        checkpoint[row['id']] = row
-        report['items'] = [checkpoint[item['id_str']] for item in items if item['id_str'] in checkpoint]
-        saved = [r for r in report['items'] if r.get('sha256')]
-        report['counts'] = {'collection_items': len(items), 'processed_items': len(report['items']),
-                            'saved_resources': len(saved), 'unique_contents': len({r['sha256'] for r in saved}),
-                            'verified_resources': sum(r['status'] == 'verified' for r in saved),
-                            'pending_inspection': sum(r['status'] == 'pending_inspection' for r in saved),
-                            'failed': sum(r['status'] == 'failed' for r in report['items'])}
-        atomic_json(report_path, report)
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(_collect_item, item, originals, previous, fetcher) for item in items]
+        for done, future in enumerate(as_completed(futures), 1):
+            row = future.result()
+            checkpoint[row['id']] = row
+            print('PROGRESS ' + json.dumps({'stage': 'downloading', 'message': f'已下载 {done}/{len(items)}',
+                                           'done': done, 'total': len(items)}, ensure_ascii=False),
+                  file=sys.stderr, flush=True)
+            if done % 20 == 0 or done == len(items):
+                report['items'] = [checkpoint[item['id_str']] for item in items if item['id_str'] in checkpoint]
+                saved = [r for r in report['items'] if r.get('sha256')]
+                report['counts'] = {'collection_items': len(items), 'processed_items': len(report['items']),
+                                    'saved_resources': len(saved), 'unique_contents': len({r['sha256'] for r in saved}),
+                                    'verified_resources': sum(r['status'] == 'verified' for r in saved),
+                                    'pending_inspection': sum(r['status'] == 'pending_inspection' for r in saved),
+                                    'failed': sum(r['status'] == 'failed' for r in report['items'])}
+                atomic_json(report_path, report)
     if not items:
         atomic_json(report_path, report)
     return report

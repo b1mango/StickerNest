@@ -1,8 +1,11 @@
+from contextlib import redirect_stderr
+import http.client
 import importlib.util
 import io
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 import urllib.request
 from unittest.mock import patch
@@ -69,6 +72,88 @@ class DownloadTests(unittest.TestCase):
             self.assertEqual(Path(root, row['file']).read_bytes(), b'unknown-format')
             self.assertTrue(row['file'].endswith('.bin'))
 
+    def test_invalid_image_tries_next_url(self):
+        data = gif()
+        truncated = data[:-10]
+        with self.assertRaisesRegex(m.DownloadError, '^invalid_image$'):
+            m.inspect_bytes(truncated)
+        sample = item()
+        second = URL + '-second'
+        sample['animate_url']['url_list'] = [URL, second]
+        calls = []
+        def fetcher(url):
+            calls.append(url)
+            return truncated if url == URL else data
+        with tempfile.TemporaryDirectory() as root:
+            row = m.collect([sample], root, fetcher)['items'][0]
+            self.assertEqual(calls, [URL, second])
+            self.assertEqual(row['status'], 'verified')
+            self.assertEqual(Path(root, row['file']).read_bytes(), data)
+
+    def test_invalid_image_is_preserved_if_other_urls_fail(self):
+        truncated = gif()[:-10]
+        sample = item()
+        sample['animate_url']['url_list'] = [URL, URL + '-second']
+        def fetcher(url):
+            if url == URL:
+                return truncated
+            raise m.DownloadError('network_failure')
+        with tempfile.TemporaryDirectory() as root:
+            row = m.collect([sample], root, fetcher)['items'][0]
+            self.assertEqual(row['status'], 'pending_inspection')
+            self.assertEqual(row['inspection_error'], 'invalid_image')
+            self.assertEqual(Path(root, row['file']).read_bytes(), truncated)
+
+    def test_pending_inspection_is_downloaded_again(self):
+        with tempfile.TemporaryDirectory() as root:
+            previous = m.collect([item()], root, lambda url: b'unknown-format')['items'][0]
+            calls = []
+            def fetcher(url):
+                calls.append(url)
+                return gif()
+            current = m.collect([item()], root, fetcher)['items'][0]
+            self.assertEqual(calls, [URL])
+            self.assertEqual(current['status'], 'verified')
+            self.assertFalse(current['resumed'])
+            self.assertEqual(Path(root, previous['file']).read_bytes(), b'unknown-format')
+
+    def test_concurrent_downloads_checkpoint_order_and_progress(self):
+        items = [item(str(index)) for index in range(41)]
+        barrier = threading.Barrier(6)
+        lock = threading.Lock()
+        calls = 0
+        data = gif()
+        def fetcher(url):
+            nonlocal calls
+            with lock:
+                calls += 1
+                call = calls
+            if call <= 6:
+                barrier.wait(timeout=5)
+            return data
+        with tempfile.TemporaryDirectory() as root, patch.object(m, 'atomic_json', wraps=m.atomic_json) as save:
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                report = m.collect(items, root, fetcher)
+            self.assertEqual(calls, len(items))
+            self.assertEqual(save.call_count, 3)
+            self.assertEqual([row['id'] for row in report['items']], [row['id_str'] for row in items])
+            self.assertEqual(report['counts']['verified_resources'], len(items))
+            self.assertEqual(report['counts']['unique_contents'], 1)
+            lines = stderr.getvalue().splitlines()
+            self.assertEqual(len(lines), len(items))
+            for done, line in enumerate(lines, 1):
+                self.assertTrue(line.startswith('PROGRESS '))
+                self.assertEqual(json.loads(line[len('PROGRESS '):]), {
+                    'stage': 'downloading', 'message': f'已下载 {done}/{len(items)}',
+                    'done': done, 'total': len(items),
+                })
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                resumed = m.collect(items, root, lambda url: self.fail('resume used network'))
+            self.assertTrue(all(row['resumed'] for row in resumed['items']))
+            self.assertEqual(len(stderr.getvalue().splitlines()), len(items))
+
     def test_size_and_decode_limits(self):
         with tempfile.TemporaryDirectory() as root, patch.object(m, 'MAX_BYTES', 5):
             report = m.collect([item()], root, lambda url: b'123456')
@@ -98,6 +183,41 @@ class DownloadTests(unittest.TestCase):
                 m.collect([item()], destination, lambda url: gif())
 
 class NetworkTests(unittest.TestCase):
+    def test_content_length_mismatch_retries_until_complete(self):
+        class Response(io.BytesIO):
+            headers = {'Content-Length': '6'}
+            def geturl(self):
+                return URL
+        class Opener:
+            calls = 0
+            def open(self, request, timeout):
+                self.calls += 1
+                return Response(b'123' if self.calls == 1 else b'123456')
+        opener = Opener()
+        with patch.object(m.time, 'sleep') as sleep:
+            self.assertEqual(m.fetch(URL, opener), b'123456')
+        self.assertEqual(opener.calls, 2)
+        sleep.assert_called_once_with(1)
+
+    def test_incomplete_read_retries(self):
+        class Response(io.BytesIO):
+            headers = {'Content-Length': '6'}
+            def geturl(self):
+                return URL
+            def read(self, size=-1):
+                raise http.client.IncompleteRead(b'123', 3)
+        class Opener:
+            calls = 0
+            def open(self, request, timeout):
+                self.calls += 1
+                return Response()
+        opener = Opener()
+        with patch.object(m.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(m.DownloadError, '^network_failure$'):
+                m.fetch(URL, opener)
+        self.assertEqual(opener.calls, 3)
+        self.assertEqual([call.args for call in sleep.call_args_list], [(1,), (2,)])
+
     def test_stream_limit_without_content_length(self):
         class Response(io.BytesIO):
             headers = {}
@@ -120,7 +240,7 @@ class NetworkTests(unittest.TestCase):
         with patch.object(m.time, 'sleep'):
             with self.assertRaisesRegex(m.DownloadError, '^network_failure$'):
                 m.fetch(URL, opener)
-        self.assertEqual(opener.calls, 2)
+        self.assertEqual(opener.calls, 3)
 
     def test_missing_original_can_be_recovered(self):
         with tempfile.TemporaryDirectory() as root:

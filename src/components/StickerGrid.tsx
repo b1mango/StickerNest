@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Layers, Star } from 'lucide-react';
-import { imageUrl } from '../api';
+import { imageUrl, thumbUrl } from '../api';
 import { shortDisplayName, type LibraryIndex } from '../lib/derive';
 import { GRID_PAD, gridGeometry, gridHits, LIST_HEAD, LIST_ROW, listHits, tileBox, type Rect } from '../lib/geometry';
 import { clickSelect, inOrder, type Selection } from '../lib/selection';
@@ -10,6 +10,7 @@ import { StickerPreview } from './StickerPreview';
 const OVERSCAN = 2;
 const DRAG_THRESHOLD = 4;
 const EDGE = 36;
+const ANIMATABLE = new Set(['gif', 'webp']);
 
 function formatDate(seconds: number) {
   return new Date(seconds * 1000).toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -19,12 +20,14 @@ type Pointer =
   | { kind: 'tile'; id: string; x: number; y: number; collapse: boolean }
   | { kind: 'marquee'; originX: number; originY: number; clientX: number; clientY: number; base: Set<string>; moved: boolean; additive: boolean };
 
-export function StickerGrid({ items, root, index, view, tileSize, selection, resetKey, empty, onSelection, onColumns, onOpen, onContextMenu, onDragOut }: {
+export function StickerGrid({ items, root, index, view, tileSize, thumbVersion, selection, resetKey, empty, onSelection, onColumns, onOpen, onContextMenu, onDragOut }: {
   items: Sticker[];
   root: string;
   index: LibraryIndex;
   view: 'grid' | 'list';
   tileSize: number;
+  /** Bumped when thumbnails finish generating so tiles that fell back to originals retry. */
+  thumbVersion: number;
   selection: Selection;
   /** Changing this scrolls back to the top (new view, new search). */
   resetKey: string;
@@ -39,6 +42,8 @@ export function StickerGrid({ items, root, index, view, tileSize, selection, res
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [scrollTop, setScrollTop] = useState(0);
   const [marquee, setMarquee] = useState<Rect | null>(null);
+  // Animated originals only play under the pointer; everything else shows its small static thumbnail.
+  const [hovered, setHovered] = useState('');
   const pointer = useRef<Pointer | null>(null);
   const latest = useRef({ selection, items, onSelection });
   latest.current = { selection, items, onSelection };
@@ -207,6 +212,8 @@ export function StickerGrid({ items, root, index, view, tileSize, selection, res
       aria-multiselectable="true"
       aria-label="表情"
       onScroll={event => setScrollTop(event.currentTarget.scrollTop)}
+      onMouseOver={event => setHovered((event.target as Element).closest<HTMLElement>('[data-id]')?.dataset.id ?? '')}
+      onMouseLeave={() => setHovered('')}
       onMouseDown={onMouseDown}
       onDoubleClick={onDoubleClick}
       onContextMenu={onContext}
@@ -230,7 +237,11 @@ export function StickerGrid({ items, root, index, view, tileSize, selection, res
                 <div key={item.id} data-id={item.id} role="option" aria-selected={selected} title={label}
                   className={`tile${selected ? ' selected' : ''}${group ? ' stacked' : ''}`}
                   style={{ transform: `translate(${box.x}px, ${box.y}px)`, width: box.size, height: box.size }}>
-                  <div className="tile-frame"><StickerPreview src={imageUrl(root, item.fileName)} name={label} /></div>
+                  <div className="tile-frame">
+                    {hovered === item.id && ANIMATABLE.has(item.format)
+                      ? <StickerPreview src={imageUrl(root, item.fileName)} name={label} eager />
+                      : <StickerPreview key={thumbVersion} src={thumbUrl(root, item.id, thumbVersion)} fallback={imageUrl(root, item.fileName)} name={label} eager />}
+                  </div>
                   {favorite ? <span className="tile-fav" aria-label="已收藏"><Star size={11} fill="currentColor" /></span> : null}
                   <span className="tile-badges">
                     {group ? <span className="tile-badge" title={`${group.memberIds.length} 个版本`}><Layers size={10} />{group.memberIds.length}</span> : null}
@@ -243,7 +254,7 @@ export function StickerGrid({ items, root, index, view, tileSize, selection, res
               <div key={item.id} data-id={item.id} role="option" aria-selected={selected}
                 className={`list-row list-cols${selected ? ' selected' : ''}${at % 2 ? ' odd' : ''}`}
                 style={{ transform: `translateY(${LIST_HEAD + at * LIST_ROW}px)` }}>
-                <span className="list-thumb"><StickerPreview src={imageUrl(root, item.fileName)} name={label} /></span>
+                <span className="list-thumb"><StickerPreview key={thumbVersion} src={thumbUrl(root, item.id, thumbVersion)} fallback={imageUrl(root, item.fileName)} name={label} eager /></span>
                 <span className="list-name" title={label}>
                   {shortDisplayName(label)}
                   {favorite ? <Star size={11} fill="currentColor" className="list-fav" /> : null}

@@ -5,6 +5,7 @@ pub mod library;
 pub mod management;
 pub mod similar;
 pub mod sharing;
+pub mod thumbs;
 mod native;
 mod preferences;
 pub mod wechat;
@@ -93,6 +94,42 @@ fn inspect_library_folder(path: String) -> Result<FolderInfo, String> {
         library::FolderKind::Other(root) => ("other", root),
     };
     Ok(FolderInfo { kind, root: root.to_string_lossy().into_owned() })
+}
+
+#[derive(Clone, Serialize)]
+struct ThumbProgress {
+    done: usize,
+    total: usize,
+}
+
+/// Generates grid thumbnails without holding the library lock for the whole run.
+#[tauri::command]
+async fn ensure_thumbnails(app: tauri::AppHandle, expected_root: String) -> Result<thumbs::ThumbReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (root, items) = {
+            let state = app.state::<LibraryState>();
+            let current = state.0.lock().map_err(|_| "资料库忙，请稍后再试")?;
+            let library = current.as_ref().ok_or("请先打开资料库")?;
+            let snapshot = library.snapshot();
+            if snapshot.root != expected_root {
+                return Err("资料库已切换，请重试".to_string());
+            }
+            let items = snapshot.items.iter()
+                .map(|item| Ok((item.id.clone(), library.asset_path(&item.id)?)))
+                .collect::<Result<Vec<_>, String>>()?;
+            (PathBuf::from(snapshot.root), items)
+        };
+        let dir = thumbs::thumbs_dir(&root);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建缩略图目录：{e}"))?;
+        app.asset_protocol_scope().allow_directory(&dir, false).map_err(|e| e.to_string())?;
+        thumbs::ensure(&root, &items, |done, total| {
+            if done % 20 == 0 || done == total {
+                let _ = app.emit("thumbs-progress", ThumbProgress { done, total });
+            }
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -365,8 +402,8 @@ async fn collect_douyin_fetch(app: tauri::AppHandle) -> Result<backup::CollectSt
         let runtime = collection_runtime(&app)?;
         let profile = app.path().app_data_dir().map_err(|e| e.to_string())?.join("douyin-browser");
         std::fs::create_dir_all(&profile).map_err(|e| format!("无法创建专用浏览器目录：{e}"))?;
-        backup::collect_douyin_fetch(&root, &runtime, &profile, |stage, message| {
-            app.emit("douyin-progress", DouyinProgress { stage, message })
+        backup::collect_douyin_fetch(&root, &runtime, &profile, |stage, message, done, total| {
+            app.emit("douyin-progress", DouyinProgress { stage, message, done, total })
                 .map_err(|e| e.to_string())
         })
     })
@@ -375,9 +412,31 @@ async fn collect_douyin_fetch(app: tauri::AppHandle) -> Result<backup::CollectSt
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DouyinProgress {
     stage: String,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    done: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<u64>,
+}
+
+#[cfg(test)]
+#[test]
+fn douyin_progress_serializes_optional_counts() {
+    let without_counts = DouyinProgress {
+        stage: "launching".into(), message: "正在启动".into(), done: None, total: None,
+    };
+    assert_eq!(serde_json::to_value(without_counts).unwrap(), serde_json::json!({
+        "stage": "launching", "message": "正在启动",
+    }));
+    let with_counts = DouyinProgress {
+        stage: "importing".into(), message: "已导入 5/6".into(), done: Some(5), total: Some(6),
+    };
+    assert_eq!(serde_json::to_value(with_counts).unwrap(), serde_json::json!({
+        "stage": "importing", "message": "已导入 5/6", "done": 5, "total": 6,
+    }));
 }
 
 #[tauri::command]
@@ -386,7 +445,24 @@ async fn collect_douyin_import(app: tauri::AppHandle) -> Result<CollectImportRes
         let state = app.state::<LibraryState>();
         let mut current = state.0.lock().map_err(|_| "资料库忙，请稍后再试")?;
         let library = current.as_mut().ok_or("请先打开资料库")?;
-        let (report, report_path) = library.collect_douyin_import()?;
+        let mut progress_error = None;
+        let (report, report_path) = library.collect_douyin_import(|done, total| {
+            if done % 5 == 0 || done == total {
+                if let Err(error) = app.emit("douyin-progress", DouyinProgress {
+                    stage: "importing".into(),
+                    message: format!("已导入 {done}/{total}"),
+                    done: Some(done as u64),
+                    total: Some(total as u64),
+                }) {
+                    if progress_error.is_none() {
+                        progress_error = Some(error.to_string());
+                    }
+                }
+            }
+        })?;
+        if let Some(error) = progress_error {
+            return Err(format!("发送导入进度失败：{error}"));
+        }
         let preview_warnings = authorize_assets(&app, library);
         Ok(CollectImportResponse {
             snapshot: library.snapshot(),
@@ -705,6 +781,7 @@ pub fn run() {
             prepare_wechat,
             inspect_library_folder,
             recent_libraries,
+            ensure_thumbnails,
             copy_to_clipboard,
             asset_paths,
             drag_icon,

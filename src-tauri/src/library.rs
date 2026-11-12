@@ -476,6 +476,15 @@ impl Library {
         paths: Vec<PathBuf>,
         source: String,
     ) -> Result<ImportReport, String> {
+        self.import_files_with_progress(paths, source, |_, _| {})
+    }
+
+    pub fn import_files_with_progress(
+        &mut self,
+        paths: Vec<PathBuf>,
+        source: String,
+        mut on_progress: impl FnMut(usize, usize),
+    ) -> Result<ImportReport, String> {
         if !valid_source(&source) {
             return Err("来源必须为本地、微信或抖音".into());
         }
@@ -487,7 +496,8 @@ impl Library {
                 report.failed.push(ImportFailure { name: path.to_string_lossy().into_owned(), error });
             }
         }
-        for path in expanded {
+        let total = expanded.len();
+        for (index, path) in expanded.into_iter().enumerate() {
             let name = path
                 .file_name()
                 .unwrap_or_default()
@@ -498,6 +508,7 @@ impl Library {
                 Ok(false) => report.duplicates += 1,
                 Err(error) => report.failed.push(ImportFailure { name, error }),
             }
+            on_progress(index + 1, total);
         }
         Ok(report)
     }
@@ -866,6 +877,24 @@ pub(crate) mod tests {
         assert_eq!(report.added, 1);
         assert_eq!(report.failed.len(), 1);
         assert!(library.import_files(vec![], "unknown".into()).is_err());
+    }
+
+    #[test]
+    fn import_progress_counts_successes_duplicates_and_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        fs::create_dir(&input).unwrap();
+        let valid = input.join("a.png");
+        fixture(&valid);
+        fs::copy(&valid, input.join("b.png")).unwrap();
+        fs::write(input.join("c.png"), b"not an image").unwrap();
+        let mut library = Library::create(dir.path()).unwrap();
+        let mut progress = Vec::new();
+        let report = library.import_files_with_progress(vec![input], "抖音".into(), |done, total| {
+            progress.push((done, total));
+        }).unwrap();
+        assert_eq!((report.added, report.duplicates, report.failed.len()), (1, 1, 1));
+        assert_eq!(progress, vec![(1, 3), (2, 3), (3, 3)]);
     }
 
     #[test]
