@@ -25,7 +25,7 @@ export function Welcome({ busy, onCreate, onOpen, onRestore }: { busy: boolean; 
             <FolderPlus size={20} /><span><strong>新建资料库</strong><small>选择一个文件夹存放表情</small></span>
           </button>
           <button className="welcome-option" disabled={busy} onClick={onOpen}>
-            <FolderOpen size={20} /><span><strong>打开资料库</strong><small>选择已有的 StickerNest Library</small></span>
+            <FolderOpen size={20} /><span><strong>打开资料库</strong><small>选择已有的资料库文件夹</small></span>
           </button>
           <button className="welcome-option" disabled={busy} onClick={onRestore}>
             <ArchiveRestore size={20} /><span><strong>从备份恢复</strong><small>校验备份后在新位置打开</small></span>

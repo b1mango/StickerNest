@@ -8,6 +8,7 @@
   "permissions": [
     "core:default",
     "dialog:allow-open",
+    "dialog:allow-ask",
     "drag:default",
     "core:window:allow-start-dragging",
     "core:window:allow-toggle-maximize"

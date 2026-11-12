@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
-import { open } from '@tauri-apps/plugin-dialog';
+import { ask, open } from '@tauri-apps/plugin-dialog';
 import { startDrag } from '@crabnebula/tauri-plugin-drag';
 import type {
   AssetMetadata, BackupSummary, ClipboardResult, DeleteResult, ExportSummary, ImportResult,
@@ -18,11 +18,22 @@ export function imageUrl(root: string, fileName: string): string {
 
 // ---- Library ----
 
+type FolderInfo = { kind: 'library' | 'empty' | 'other'; root: string };
+
 export async function chooseLibrary(create: boolean): Promise<Snapshot | null> {
   const path = await open({ directory: true, multiple: false,
-    title: create ? '选择新资料库的存放位置' : '打开 StickerNest Library 文件夹' });
+    title: create ? '选择资料库文件夹（空文件夹会直接作为资料库）' : '选择资料库文件夹' });
   if (!path) return null;
-  return invoke<Snapshot>('select_library', { path, create });
+  if (create) return invoke<Snapshot>('select_library', { path, create: true });
+  const folder = await invoke<FolderInfo>('inspect_library_folder', { path });
+  if (folder.kind === 'empty') {
+    const name = folder.root.split('/').pop() || folder.root;
+    const ok = await ask(`「${name}」是空文件夹，还不是资料库。要在这里新建资料库吗？`,
+      { title: '新建资料库', kind: 'info', okLabel: '新建', cancelLabel: '取消' });
+    return ok ? invoke<Snapshot>('select_library', { path: folder.root, create: true }) : null;
+  }
+  if (folder.kind === 'other') throw new Error('这个文件夹不是 StickerNest 资料库（缺少 library.json）。请选择资料库文件夹，或用「新建资料库」。');
+  return invoke<Snapshot>('select_library', { path: folder.root, create: false });
 }
 
 export async function currentLibrary(): Promise<Snapshot | null> {

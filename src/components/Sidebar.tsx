@@ -55,15 +55,15 @@ export function Sidebar({ index, nav, libraryName, dropTarget, onNav, onNewColle
           <Row icon={<Clock size={16} />} label="最近使用" count={index.counts.recent} active={is({ kind: 'recent' })} onSelect={() => onNav({ kind: 'recent' })} />
         </div>
 
-        <div className="side-section">
+        {SOURCES.some(source => index.counts.sources[source]) ? <div className="side-section">
           <p className="side-heading">来源</p>
-          {SOURCES.map(source => (
+          {SOURCES.filter(source => index.counts.sources[source]).map(source => (
             <Row key={source} icon={SOURCE_ICONS[source]} label={source === '本地' ? '本地导入' : source}
               count={index.counts.sources[source] ?? 0}
               active={is({ kind: 'source', value: source })}
               onSelect={() => onNav({ kind: 'source', value: source })} />
           ))}
-        </div>
+        </div> : null}
 
         <div className="side-section">
           <div className="side-heading-row">

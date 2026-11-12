@@ -48,16 +48,18 @@ async fn select_library(
         let mut current = state.0.lock().map_err(|_| "资料库忙，请重新打开应用")?;
         if !create {
             if let Some(library) = current.as_ref() {
-                if PathBuf::from(&path).canonicalize().ok().as_ref()
-                    == Some(&PathBuf::from(library.snapshot().root))
-                {
+                let picked = match Library::locate(Path::new(&path)) {
+                    Ok(library::FolderKind::Library(root)) => Some(root),
+                    _ => None,
+                };
+                if picked.as_ref() == Some(&PathBuf::from(library.snapshot().root)) {
                     remember_library(&app, &library.snapshot().root);
                     return Ok(library.snapshot());
                 }
             }
         }
         let library = if create {
-            Library::create(&PathBuf::from(path))?
+            Library::create_at(&PathBuf::from(path))?
         } else {
             Library::open(&PathBuf::from(path))?
         };
@@ -73,6 +75,24 @@ async fn select_library(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderInfo {
+    kind: &'static str,
+    root: String,
+}
+
+/// Tells the picker what the chosen folder is before opening it.
+#[tauri::command]
+fn inspect_library_folder(path: String) -> Result<FolderInfo, String> {
+    let (kind, root) = match Library::locate(Path::new(&path))? {
+        library::FolderKind::Library(root) => ("library", root),
+        library::FolderKind::Empty(root) => ("empty", root),
+        library::FolderKind::Other(root) => ("other", root),
+    };
+    Ok(FolderInfo { kind, root: root.to_string_lossy().into_owned() })
 }
 
 #[tauri::command]
@@ -670,6 +690,7 @@ pub fn run() {
             set_favorite,
             mark_used,
             prepare_wechat,
+            inspect_library_folder,
             copy_to_clipboard,
             asset_paths,
             drag_icon,

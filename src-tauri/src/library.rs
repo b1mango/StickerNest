@@ -59,6 +59,12 @@ struct Manifest {
     items: Vec<Sticker>,
 }
 
+pub enum FolderKind {
+    Library(PathBuf),
+    Empty(PathBuf),
+    Other(PathBuf),
+}
+
 pub struct Library {
     root: PathBuf,
     manifest: Manifest,
@@ -231,6 +237,52 @@ impl Library {
         Ok(library)
     }
 
+    /// Classifies a folder picked by the user: a library itself, a folder that
+    /// holds one `StickerNest Library`, an empty folder, or something else.
+    pub fn locate(path: &Path) -> Result<FolderKind, String> {
+        let meta = fs::symlink_metadata(path).map_err(|e| format!("无法读取文件夹：{e}"))?;
+        if !meta.file_type().is_dir() {
+            return Err("请选择实际文件夹，不能是文件或符号链接".into());
+        }
+        let path = path.canonicalize().map_err(err)?;
+        let is_library = |dir: &Path| {
+            fs::symlink_metadata(dir.join("library.json")).map(|m| m.file_type().is_file()).unwrap_or(false)
+        };
+        if is_library(&path) {
+            return Ok(FolderKind::Library(path));
+        }
+        let nested = path.join("StickerNest Library");
+        if fs::symlink_metadata(&nested).map(|m| m.file_type().is_dir()).unwrap_or(false) && is_library(&nested) {
+            return Ok(FolderKind::Library(nested));
+        }
+        // Finder metadata and a lock left by an earlier failed open don't count as content.
+        let empty = fs::read_dir(&path)
+            .map_err(|e| format!("无法读取文件夹：{e}"))?
+            .filter_map(Result::ok)
+            .all(|e| matches!(e.file_name().to_str(), Some(".DS_Store" | ".library.lock")));
+        Ok(if empty { FolderKind::Empty(path) } else { FolderKind::Other(path) })
+    }
+
+    /// Creates a library from a picked folder: an empty folder becomes the
+    /// library itself, otherwise a `StickerNest Library` subfolder is created.
+    pub fn create_at(target: &Path) -> Result<Self, String> {
+        match Self::locate(target)? {
+            FolderKind::Library(_) => Err("这个文件夹已经是资料库，请用「打开资料库」".into()),
+            FolderKind::Empty(root) => {
+                fs::create_dir(root.join("assets")).map_err(err)?;
+                let lock = Self::acquire_lock(&root)?;
+                let library = Self {
+                    root,
+                    manifest: Manifest { version: 1, items: vec![] },
+                    lock: std::sync::Arc::new(lock),
+                };
+                library.save(&library.manifest)?;
+                Ok(library)
+            }
+            FolderKind::Other(parent) => Self::create(&parent),
+        }
+    }
+
     pub fn open(root: &Path) -> Result<Self, String> {
         if !fs::symlink_metadata(root)
             .map_err(err)?
@@ -239,7 +291,11 @@ impl Library {
         {
             return Err("资料库必须是实际文件夹，不能是符号链接".into());
         }
-        let root = root.canonicalize().map_err(err)?;
+        let root = match Self::locate(root)? {
+            FolderKind::Library(root) => root,
+            FolderKind::Empty(_) => return Err("这是一个空文件夹，还不是资料库。可以用「新建资料库」选择它，直接在其中建库".into()),
+            FolderKind::Other(_) => return Err("这个文件夹不是 StickerNest 资料库（缺少 library.json）".into()),
+        };
         let lock = Self::acquire_lock(&root)?;
         Self::recover_deletion(&root)?;
         Self::check_assets(&root)?;
@@ -474,6 +530,39 @@ pub(crate) mod tests {
         bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
         bytes.extend(body);
         bytes
+    }
+
+    #[test]
+    fn picked_folders_are_classified_and_empty_folders_become_libraries() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("表情包库");
+        fs::create_dir(&empty).unwrap();
+        fs::write(empty.join(".DS_Store"), b"x").unwrap();
+        let message = Library::open(&empty).err().unwrap();
+        assert!(message.contains("空文件夹"), "{message}");
+        assert!(!empty.join(".library.lock").exists(), "a failed open must not leave a lock behind");
+        assert!(matches!(Library::locate(&empty).unwrap(), FolderKind::Empty(_)));
+
+        let lib = Library::create_at(&empty).unwrap();
+        assert_eq!(PathBuf::from(lib.snapshot().root), empty.canonicalize().unwrap());
+        assert!(empty.join("library.json").is_file() && empty.join("assets").is_dir());
+        assert!(Library::create_at(&empty).is_err());
+        drop(lib);
+        assert_eq!(Library::open(&empty).unwrap().snapshot().root, lib_root(&empty));
+
+        let other = dir.path().join("other");
+        fs::create_dir(&other).unwrap();
+        fs::write(other.join("notes.txt"), b"x").unwrap();
+        assert!(Library::open(&other).err().unwrap().contains("library.json"));
+        let nested = Library::create_at(&other).unwrap();
+        assert_eq!(PathBuf::from(nested.snapshot().root), other.canonicalize().unwrap().join("StickerNest Library"));
+        drop(nested);
+        // Picking the parent of a library opens the library inside it.
+        assert!(Library::open(&other).unwrap().snapshot().root.ends_with("StickerNest Library"));
+    }
+
+    fn lib_root(path: &Path) -> String {
+        path.canonicalize().unwrap().to_string_lossy().into_owned()
     }
 
     #[test]
