@@ -20,7 +20,7 @@ type Pointer =
   | { kind: 'tile'; id: string; x: number; y: number; collapse: boolean }
   | { kind: 'marquee'; originX: number; originY: number; clientX: number; clientY: number; base: Set<string>; moved: boolean; additive: boolean };
 
-export function StickerGrid({ items, root, index, view, tileSize, thumbVersion, selection, resetKey, empty, onSelection, onColumns, onOpen, onContextMenu, onDragOut }: {
+export function StickerGrid({ items, root, index, view, tileSize, thumbVersion, animate, selection, resetKey, empty, onSelection, onColumns, onOpen, onContextMenu, onDragOut }: {
   items: Sticker[];
   root: string;
   index: LibraryIndex;
@@ -28,6 +28,7 @@ export function StickerGrid({ items, root, index, view, tileSize, thumbVersion, 
   tileSize: number;
   /** Bumped when thumbnails finish generating so tiles that fell back to originals retry. */
   thumbVersion: number;
+  animate: 'hover' | 'always' | 'never';
   selection: Selection;
   /** Changing this scrolls back to the top (new view, new search). */
   resetKey: string;
@@ -238,7 +239,7 @@ export function StickerGrid({ items, root, index, view, tileSize, thumbVersion, 
                   className={`tile${selected ? ' selected' : ''}${group ? ' stacked' : ''}`}
                   style={{ transform: `translate(${box.x}px, ${box.y}px)`, width: box.size, height: box.size }}>
                   <div className="tile-frame">
-                    {hovered === item.id && ANIMATABLE.has(item.format)
+                    {ANIMATABLE.has(item.format) && (animate === 'always' || (animate === 'hover' && hovered === item.id))
                       ? <StickerPreview src={imageUrl(root, item.fileName)} name={label} eager />
                       : <StickerPreview key={thumbVersion} src={thumbUrl(root, item.id, thumbVersion)} fallback={imageUrl(root, item.fileName)} name={label} eager />}
                   </div>

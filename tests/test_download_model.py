@@ -141,17 +141,43 @@ class DownloadTests(unittest.TestCase):
             progress = [json.loads(line.removeprefix('PROGRESS ')) for line in lines]
             total = len(MODEL_BYTES) + len(PACK_BYTES)
             self.assertTrue(all(line.startswith('PROGRESS ') for line in lines))
-            self.assertTrue(all(row['stage'] == 'downloading-model' for row in progress))
-            self.assertEqual(progress[-1]['done'], total)
-            self.assertEqual(progress[-1]['total'], total)
-            self.assertEqual([row['done'] for row in progress], sorted(row['done'] for row in progress))
-            percentages = [row['done'] * 100 // total for row in progress]
+            self.assertEqual(progress[0]['stage'], 'checking')
+            self.assertEqual(progress[-1]['stage'], 'done')
+            self.assertEqual(progress[-1]['message'], '已更新识别模型、形象包')
+            downloading = [row for row in progress if row['stage'] == 'downloading-model']
+            self.assertEqual(len(downloading), len(progress) - 2)
+            self.assertEqual(downloading[-1]['done'], total)
+            self.assertTrue(all(row['total'] == total for row in downloading))
+            self.assertEqual([row['done'] for row in downloading], sorted(row['done'] for row in downloading))
+            percentages = [row['done'] * 100 // total for row in downloading]
             self.assertEqual(len(percentages), len(set(percentages)))
-            self.assertLessEqual(len(lines), 100)
+            self.assertLessEqual(len(lines), 102)
 
             manifest_only = Opener({MANIFEST_URL: raw_manifest})
-            m.download(MANIFEST_URL, root, manifest_only)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                m.download(MANIFEST_URL, root, manifest_only)
             self.assertEqual([call[0] for call in manifest_only.calls], [MANIFEST_URL])
+            self.assertEqual(json.loads(stderr.getvalue().splitlines()[-1].removeprefix('PROGRESS '))['message'], '已是最新版本，无需下载')
+
+    def test_pack_update_does_not_download_model_again(self):
+        response_map, _ = responses()
+        with tempfile.TemporaryDirectory() as root:
+            with redirect_stderr(io.StringIO()):
+                m.download(MANIFEST_URL, root, Opener(response_map))
+            new_pack = b'{"characters": ["sample", "more"]}'
+            changed, raw = responses(manifest(pack=new_pack))
+            changed[PACK_URL] = new_pack
+            opener = Opener(changed)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                m.download(MANIFEST_URL, root, opener)
+            self.assertNotIn(MODEL_URL, [call[0] for call in opener.calls])
+            self.assertEqual((Path(root) / 'characters.json').read_bytes(), new_pack)
+            rows = [json.loads(line.removeprefix('PROGRESS ')) for line in stderr.getvalue().splitlines()]
+            downloading = [row for row in rows if row['stage'] == 'downloading-model']
+            self.assertTrue(downloading and all(row['total'] == len(new_pack) and row['message'] == '正在下载形象包' for row in downloading))
+            self.assertEqual(rows[-1]['message'], '已更新形象包')
 
     def test_existing_part_uses_range_and_verifies_content_range(self):
         response_map, _ = responses()

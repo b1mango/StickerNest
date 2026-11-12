@@ -1,11 +1,80 @@
 import { useEffect, useMemo, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { Check, ScanFace } from 'lucide-react';
-import { imageUrl, thumbUrl, type CharacterSuggestion, type ClassifyResult, type CountProgress } from '../api';
+import { Check, RefreshCw, ScanFace } from 'lucide-react';
+import * as api from '../api';
+import { imageUrl, thumbUrl, type CharacterSuggestion, type ClassifierStatus, type ClassifyResult, type CountProgress } from '../api';
+import { formatBytes } from '../types';
 import type { Sticker } from '../types';
 import { StickerPreview } from './StickerPreview';
 
 type Group = { character: string; items: CharacterSuggestion[] };
+
+/** Approximate first download, shown before enabling. */
+const DOWNLOAD_HINT = '约 176 MB';
+
+/**
+ * Installs, updates and removes the recognizer. Updating re-checks the manifest and
+ * only downloads files that changed, so a new character pack never re-fetches the model.
+ */
+function ClassifierControls({ status, onStatus }: { status: ClassifierStatus | null; onStatus: (status: ClassifierStatus) => void }) {
+  const [busy, setBusy] = useState<'' | 'enable' | 'disable'>('');
+  const [progress, setProgress] = useState<api.CountProgress | null>(null);
+  const [note, setNote] = useState('');
+  const [error, setError] = useState('');
+  useEffect(() => {
+    const unlisten = listen<api.CountProgress>('classifier-progress', ({ payload }) => {
+      setProgress(payload);
+      if (payload.stage === 'done' && payload.message) setNote(payload.message);
+    });
+    return () => { void unlisten.then(stop => stop()); };
+  }, []);
+
+  async function run(kind: 'enable' | 'disable') {
+    setBusy(kind); setError(''); setNote(''); setProgress(null);
+    try {
+      if (kind === 'enable') onStatus(await api.enableClassifier());
+      else { await api.disableClassifier(); onStatus(await api.classifierStatus()); }
+    } catch (reason) {
+      setError(String(reason).replace(/^Error:\s*/, ''));
+    } finally {
+      setBusy(''); setProgress(null);
+    }
+  }
+
+  const enabled = !!status?.enabled;
+  const downloading = busy === 'enable' && progress?.stage === 'downloading-model' && progress.total > 0;
+  const bar = busy === 'enable' ? (
+    <div className="collect-progress classifier-progress">
+      <div className="collect-progress-label">
+        <span>{progress?.message ?? '正在连接…'}</span>
+        <span>{downloading ? `${formatBytes(progress!.done)} / ${formatBytes(progress!.total)}` : ''}</span>
+      </div>
+      <progress max={downloading ? progress!.total : 1} value={downloading ? progress!.done : undefined} />
+    </div>
+  ) : null;
+
+  if (!enabled) {
+    return <div className="similar-empty">
+      <ScanFace size={30} className="empty-icon-plain" />
+      <h2>形象识别</h2>
+      <p>识别表情里的形象（草地牛、奶蛙、chiikawa、熊猫头、龙图……），确认后归入同名合集。全部在本机运行，图片不会上传。</p>
+      {bar ?? <button className="button primary" onClick={() => void run('enable')}>启用（下载识别模型与形象包，{DOWNLOAD_HINT}）</button>}
+      {error ? <p className="field-error" role="alert">{error}</p> : null}
+    </div>;
+  }
+  return <div className="classifier-bar">
+    <div className="classifier-info">
+      <strong>{status!.characters.length} 个形象</strong>
+      <span>{status!.characters.join('、')}</span>
+      <small>识别模型与形象包共 {formatBytes(status!.bytes)}{note ? ` · ${note}` : ''}</small>
+    </div>
+    {bar ?? <div className="editor-actions">
+      <button className="button secondary" disabled={!!busy} onClick={() => void run('enable')}><RefreshCw size={13} />更新形象包</button>
+      <button className="button secondary danger-text" disabled={!!busy} onClick={() => void run('disable')}>{busy === 'disable' ? '正在停用…' : '停用并删除模型'}</button>
+    </div>}
+    {error ? <p className="field-error" role="alert">{error}</p> : null}
+  </div>;
+}
 
 /** Groups suggestions per character, strongest first; confident ones start checked. */
 function grouped(result: ClassifyResult | null): Group[] {
@@ -21,7 +90,9 @@ function grouped(result: ClassifyResult | null): Group[] {
     .sort((a, b) => b.items.length - a.items.length);
 }
 
-export function CharacterReview({ result, running, items, root, thumbVersion, onRun, onAccept, onDismiss }: {
+export function CharacterReview({ status, onStatus, result, running, items, root, thumbVersion, onRun, onAccept, onDismiss }: {
+  status: ClassifierStatus | null;
+  onStatus: (status: ClassifierStatus) => void;
   result: ClassifyResult | null;
   running: boolean;
   items: Sticker[];
@@ -63,8 +134,14 @@ export function CharacterReview({ result, running, items, root, thumbVersion, on
     try { await action(); } catch (reason) { setError(String(reason).replace(/^Error:\s*/, '')); } finally { setBusy(''); }
   }
 
+  const controls = <ClassifierControls status={status} onStatus={onStatus} />;
+  if (!status?.enabled) {
+    return <section className="similar-page" aria-label="形象识别">{controls}</section>;
+  }
+
   if (running || !result) {
     return <section className="similar-page" aria-label="形象识别">
+      {controls}
       <div className="similar-empty">
         <ScanFace size={30} className="empty-icon-plain" />
         <h2>{running ? '正在识别表情里的形象…' : '识别表情里的形象'}</h2>
@@ -86,6 +163,7 @@ export function CharacterReview({ result, running, items, root, thumbVersion, on
 
   if (!groups.length) {
     return <section className="similar-page" aria-label="形象识别">
+      {controls}
       <div className="similar-empty">
         <Check size={30} className="empty-icon-plain" />
         <h2>没有新的建议</h2>
@@ -95,6 +173,7 @@ export function CharacterReview({ result, running, items, root, thumbVersion, on
   }
 
   return <section className="similar-page" aria-label="形象识别">
+    {controls}
     {error ? <p className="field-error" role="alert">{error}</p> : null}
     {groups.map(group => {
       const selectedSuggestions = group.items.filter(s => checked.has(key(group.character, s.assetId)));

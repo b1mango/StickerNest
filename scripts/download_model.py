@@ -118,6 +118,14 @@ def proxies():
     return found
 
 
+LABELS = {'vision.safetensors': '识别模型', 'characters.json': '形象包'}
+
+
+def emit(stage, message, done, total):
+    print('PROGRESS ' + json.dumps({'stage': stage, 'message': message, 'done': done, 'total': total},
+                                   ensure_ascii=False), file=sys.stderr, flush=True)
+
+
 def download(manifest_url, destination, opener=None):
     opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler(proxies()), GitHubRedirect())
     def get_manifest():
@@ -130,34 +138,36 @@ def download(manifest_url, destination, opener=None):
         raise DownloadError('模型清单不是有效 JSON') from exc
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    total = sum(item['size'] for item in files)
+    emit('checking', '正在检查已有文件', 0, 0)
+    # Files already present with the right hash are kept: updating the character
+    # pack must not re-download the 176 MB model.
+    needed = [item for item in files if not (
+        (destination / item['name']).is_file()
+        and (destination / item['name']).stat().st_size == item['size']
+        and digest(destination / item['name']) == item['sha256'].lower())]
+    total = sum(item['size'] for item in needed)
     completed = 0
     last_percent = -1
 
-    def progress(done):
+    def progress(done, label):
         nonlocal last_percent
-        percent = done * 100 // total
+        percent = done * 100 // total if total else 100
         if percent > last_percent:
-            print('PROGRESS ' + json.dumps({'stage': 'downloading-model', 'message': '正在下载形象识别模型',
-                                           'done': done, 'total': total}, ensure_ascii=False),
-                  file=sys.stderr, flush=True)
+            emit('downloading-model', f'正在下载{label}', done, total)
             last_percent = percent
 
-    for item in files:
+    for item in needed:
         target = destination / item['name']
         part = destination / (item['name'] + '.part')
         size, expected = item['size'], item['sha256'].lower()
-        if target.is_file() and target.stat().st_size == size and digest(target) == expected:
-            completed += size
-            progress(completed)
-            continue
+        label = LABELS.get(item['name'], item['name'])
 
         def transfer():
             offset = part.stat().st_size if part.exists() else 0
             if offset > size:
                 part.unlink()
                 offset = 0
-            progress(completed + offset)
+            progress(completed + offset, label)
             if offset < size:
                 headers = {'Range': f'bytes={offset}-'} if offset else {}
                 with open_url(opener, item['url'], headers) as response:
@@ -180,7 +190,7 @@ def download(manifest_url, destination, opener=None):
                             if offset > size:
                                 raise DownloadError('下载文件大小超出清单')
                             file.write(chunk)
-                            progress(completed + offset)
+                            progress(completed + offset, label)
                         file.flush()
                         os.fsync(file.fileno())
             if part.stat().st_size != size:
@@ -192,8 +202,11 @@ def download(manifest_url, destination, opener=None):
 
         retry(transfer)
         completed += size
-        progress(completed)
+        progress(completed, label)
     atomic_write(destination / 'manifest.json', manifest_bytes)
+    updated = [LABELS.get(item['name'], item['name']) for item in needed]
+    emit('done', ('已更新' + '、'.join(updated)) if updated else '已是最新版本，无需下载', total, total)
+    return updated
 
 
 def main():

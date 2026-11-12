@@ -10,13 +10,15 @@ export const Toolbar = forwardRef<HTMLInputElement, {
   query: string;
   canEmptyTrash: boolean;
   scanning: boolean;
+  /** Review modes whose action is not available yet (e.g. recognizer not installed). */
+  rescanHidden?: boolean;
   onQuery: (value: string) => void;
   onPrefs: (patch: Partial<Prefs>) => void;
   onSortMenu: (anchor: DOMRect) => void;
   onImportMenu: (anchor: DOMRect) => void;
   onEmptyTrash: () => void;
   onRescan: () => void;
-}>(function Toolbar({ title, subtitle, mode, prefs, query, canEmptyTrash, scanning, onQuery, onPrefs, onSortMenu, onImportMenu, onEmptyTrash, onRescan }, searchRef) {
+}>(function Toolbar({ title, subtitle, mode, prefs, query, canEmptyTrash, scanning, rescanHidden = false, onQuery, onPrefs, onSortMenu, onImportMenu, onEmptyTrash, onRescan }, searchRef) {
   return (
     <header className="toolbar" data-window-drag-region>
       <div className="toolbar-title" data-window-drag-region>
@@ -25,7 +27,7 @@ export const Toolbar = forwardRef<HTMLInputElement, {
       </div>
 
       <div className="toolbar-tools">
-        {mode === 'similar' || mode === 'characters' ? (
+        {mode === 'similar' || mode === 'characters' ? (rescanHidden ? null :
           <button className="btn" disabled={scanning} onClick={onRescan}>
             <RefreshCw size={14} className={scanning ? 'spin' : undefined} />
             {mode === 'characters' ? (scanning ? '正在识别…' : '重新识别') : (scanning ? '正在扫描…' : '重新扫描')}

@@ -34,12 +34,11 @@ function Row({ icon, label, count, active, onSelect, onContextMenu, dropName, dr
   );
 }
 
-export function Sidebar({ index, nav, libraryName, dropTarget, charactersEnabled, onNav, onNewCollection, onCollectionMenu, onLibraryMenu }: {
+export function Sidebar({ index, nav, libraryName, dropTarget, onNav, onNewCollection, onCollectionMenu, onLibraryMenu }: {
   index: LibraryIndex;
   nav: Nav;
   libraryName: string;
   dropTarget: string;
-  charactersEnabled: boolean;
   onNav: (nav: Nav) => void;
   onNewCollection: () => void;
   onCollectionMenu: (name: string, event: React.MouseEvent) => void;
@@ -83,7 +82,7 @@ export function Sidebar({ index, nav, libraryName, dropTarget, charactersEnabled
         <div className="side-section">
           <p className="side-heading">整理</p>
           <Row icon={<ScanSearch size={16} />} label="相似项" active={is({ kind: 'similar' })} onSelect={() => onNav({ kind: 'similar' })} />
-          {charactersEnabled ? <Row icon={<ScanFace size={16} />} label="形象识别" active={is({ kind: 'characters' })} onSelect={() => onNav({ kind: 'characters' })} /> : null}
+          <Row icon={<ScanFace size={16} />} label="形象识别" active={is({ kind: 'characters' })} onSelect={() => onNav({ kind: 'characters' })} />
           <Row icon={<Trash2 size={16} />} label="回收站" count={index.counts.trash} active={is({ kind: 'trash' })} onSelect={() => onNav({ kind: 'trash' })} />
         </div>
       </nav>

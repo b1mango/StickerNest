@@ -454,3 +454,23 @@ dialog::backdrop { background: var(--scrim); }
 .character-score { position: absolute; right: 8px; bottom: 8px; padding: 0 5px; border-radius: 4px; background: rgba(0, 0, 0, .5); color: #fff; font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .character-score.strong { background: var(--accent); }
 .character-move { position: absolute; left: 8px; bottom: 8px; padding: 0 5px; border-radius: 4px; background: var(--fav, #ff9f0a); color: #fff; font-size: 10px; font-weight: 600; }
+
+/* Settings v2 */
+.settings-sheet .sheet-body { gap: 10px; max-height: calc(100vh - 80px); overflow-y: auto; }
+.settings-segmented { align-self: flex-start; margin-top: 6px; }
+.settings-line { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.settings-line .settings-meta { margin-left: auto; white-space: nowrap; }
+.settings-cache { display: flex; flex-direction: column; gap: 1px; min-width: 0; font-size: 12px; }
+.settings-cache small { color: var(--text-3); font-size: 11px; line-height: 1.4; }
+.settings-line .settings-cache + .settings-meta { min-width: 64px; text-align: right; }
+
+/* Recognizer controls on the 形象识别 page */
+.classifier-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 14px; border-radius: var(--r-xl); background: var(--raised); box-shadow: 0 0 0 .5px var(--line); }
+.classifier-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.classifier-info strong { font-size: 13px; }
+.classifier-info span { font-size: 12px; color: var(--text-2); }
+.classifier-info small { font-size: 11px; color: var(--text-3); }
+.classifier-progress { width: 300px; max-width: 100%; }
+.classifier-bar .field-error { flex-basis: 100%; }
+.settings-segmented { display: inline-flex; width: auto; }
+.settings-segmented button { width: auto; min-width: 0; padding: 0 12px; white-space: nowrap; }

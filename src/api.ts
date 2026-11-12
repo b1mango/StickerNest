@@ -268,3 +268,24 @@ export function classifyLibrary(expectedRoot: string): Promise<ClassifyResult> {
 export function dismissSuggestions(expectedRoot: string, pairs: { assetId: string; character: string }[]): Promise<void> {
   return invoke('dismiss_suggestions', { expectedRoot, pairs });
 }
+
+// ---- Settings: storage and Douyin browser ----
+
+export type CacheKind = 'thumbs' | 'recognition' | 'downloads';
+export type CacheUsage = Record<CacheKind, number>;
+
+export function cacheUsage(expectedRoot: string): Promise<CacheUsage> {
+  return invoke('cache_usage', { expectedRoot });
+}
+
+export function clearCache(expectedRoot: string, kind: CacheKind): Promise<void> {
+  return invoke('clear_cache', { expectedRoot, kind });
+}
+
+export function douyinBrowserStatus(): Promise<{ exists: boolean; bytes: number }> {
+  return invoke('douyin_browser_status');
+}
+
+export function clearDouyinBrowser(): Promise<void> {
+  return invoke('clear_douyin_browser');
+}

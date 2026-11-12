@@ -752,6 +752,128 @@ async fn empty_trash(app: tauri::AppHandle, expected_root: String) -> Result<lib
     }).await.map_err(|e| e.to_string())?
 }
 
+// ---- Settings: storage and Douyin browser ----
+
+fn dir_size(path: &Path) -> u64 {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => std::fs::read_dir(path)
+            .map(|entries| entries.flatten().map(|entry| dir_size(&entry.path())).sum())
+            .unwrap_or(0),
+        Ok(meta) => meta.len(),
+        Err(_) => 0,
+    }
+}
+
+/// Regenerable data inside the library; originals and library.json are never part of it.
+fn cache_parts(root: &Path, kind: &str) -> Result<Vec<PathBuf>, String> {
+    let cache = root.join("cache");
+    Ok(match kind {
+        "thumbs" => vec![thumbs::thumbs_dir(root)],
+        // Recognition vectors and recognized text; dismissed suggestions are kept.
+        "recognition" => std::fs::read_dir(&cache).map(|entries| entries.flatten().map(|e| e.path())
+            .filter(|path| path.file_name().and_then(|n| n.to_str())
+                .is_some_and(|name| name == "ocr.json" || (name.starts_with("embeddings-") && name.ends_with(".bin"))))
+            .collect()).unwrap_or_default(),
+        "downloads" => vec![root.join("downloads")],
+        _ => return Err("未知的缓存类型".into()),
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheUsage {
+    thumbs: u64,
+    recognition: u64,
+    downloads: u64,
+}
+
+fn current_root(app: &tauri::AppHandle, expected_root: &str) -> Result<PathBuf, String> {
+    let state = app.state::<LibraryState>();
+    let current = state.0.lock().map_err(|_| "资料库忙，请稍后再试")?;
+    let library = current.as_ref().ok_or("请先打开资料库")?;
+    library.check_expected_root(expected_root)?;
+    Ok(PathBuf::from(library.snapshot().root))
+}
+
+#[tauri::command]
+async fn cache_usage(app: tauri::AppHandle, expected_root: String) -> Result<CacheUsage, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = current_root(&app, &expected_root)?;
+        let size = |kind| cache_parts(&root, kind).map(|parts| parts.iter().map(|p| dir_size(p)).sum::<u64>());
+        Ok(CacheUsage { thumbs: size("thumbs")?, recognition: size("recognition")?, downloads: size("downloads")? })
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn clear_cache(app: tauri::AppHandle, expected_root: String, kind: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = current_root(&app, &expected_root)?;
+        let _classify = classify::operation_lock().lock().map_err(|_| "形象识别忙，请稍后再试")?;
+        for part in cache_parts(&root, &kind)? {
+            let meta = match std::fs::symlink_metadata(&part) { Ok(meta) => meta, Err(_) => continue };
+            let result = if meta.is_dir() { std::fs::remove_dir_all(&part) } else { std::fs::remove_file(&part) };
+            result.map_err(|e| format!("无法清理 {}：{e}", part.display()))?;
+        }
+        Ok(())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+#[test]
+fn cache_parts_never_include_originals_or_dismissed_suggestions() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("cache/thumbs")).unwrap();
+    for name in ["embeddings-laion-clip-vit-b32.bin", "ocr.json", "classify-dismissed.json"] {
+        std::fs::write(root.join("cache").join(name), b"x").unwrap();
+    }
+    let mut recognition = cache_parts(root, "recognition").unwrap();
+    recognition.sort();
+    assert_eq!(recognition, vec![root.join("cache/embeddings-laion-clip-vit-b32.bin"), root.join("cache/ocr.json")]);
+    assert_eq!(cache_parts(root, "thumbs").unwrap(), vec![root.join("cache/thumbs")]);
+    assert_eq!(cache_parts(root, "downloads").unwrap(), vec![root.join("downloads")]);
+    assert!(cache_parts(root, "assets").is_err());
+    assert_eq!(dir_size(&root.join("cache")), 3);
+}
+
+fn douyin_profile(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("douyin-browser"))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DouyinBrowserStatus {
+    exists: bool,
+    bytes: u64,
+}
+
+#[tauri::command]
+async fn douyin_browser_status(app: tauri::AppHandle) -> Result<DouyinBrowserStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let profile = douyin_profile(&app)?;
+        Ok(DouyinBrowserStatus { exists: profile.join("Default").is_dir(), bytes: dir_size(&profile) })
+    }).await.map_err(|e| e.to_string())?
+}
+
+/// Signs out of Douyin by deleting the dedicated browser profile (cookies included).
+#[tauri::command]
+async fn clear_douyin_browser(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let profile = douyin_profile(&app)?;
+        let running = std::process::Command::new("/usr/bin/pgrep")
+            .args(["-f", &format!("--user-data-dir={}", profile.display())])
+            .output().map(|out| out.status.success()).unwrap_or(false);
+        if running {
+            return Err("抖音专用浏览器正在运行，请先关闭它再清除".into());
+        }
+        match std::fs::remove_dir_all(&profile) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("无法清除抖音登录数据：{error}")),
+        }
+    }).await.map_err(|e| e.to_string())?
+}
+
 /// Bundled Apple Vision OCR helper (tools/ocr-helper); tauri dev uses the project copy.
 fn ocr_helper(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let bundled = app.path().resource_dir().map_err(|e| e.to_string())?.join("ocr-helper");
@@ -959,7 +1081,11 @@ pub fn run() {
             enable_classifier,
             disable_classifier,
             classify_library,
-            dismiss_suggestions
+            dismiss_suggestions,
+            cache_usage,
+            clear_cache,
+            douyin_browser_status,
+            clear_douyin_browser
         ])
         .run(tauri::generate_context!())
         .expect("无法启动拾趣桌面应用");

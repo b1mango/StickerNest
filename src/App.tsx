@@ -393,10 +393,11 @@ export default function App() {
   }, [root, classifying, toast]);
   useEffect(() => {
     if (nav.kind === 'characters' && !classifyResult && !classifying && classifier?.enabled) void runClassify();
-  }, [nav.kind]);
+  }, [nav.kind, classifier?.enabled, classifyResult === null]);
+  // Window appearance: null follows macOS.
   useEffect(() => {
-    if (nav.kind === 'characters' && classifier && !classifier.enabled) navigate({ kind: 'all' });
-  }, [classifier, nav.kind, navigate]);
+    if (api.isDesktop) void getCurrentWindow().setTheme(prefs.theme === 'system' ? null : prefs.theme).catch(() => undefined);
+  }, [prefs.theme]);
   function withoutSuggestions(character: string, ids: string[]) {
     const gone = new Set(ids);
     setClassifyResult(result => result && {
@@ -449,7 +450,7 @@ export default function App() {
   const title = navTitle(nav);
   const mode = nav.kind === 'similar' ? 'similar' : nav.kind === 'characters' ? 'characters' : inTrash ? 'trash' : 'browse';
   const subtitle = mode === 'similar' ? '找出重复与相似的表情'
-    : mode === 'characters' ? (classifyResult ? `${classifyResult.suggestions.length} 个建议待确认` : '按形象自动归类')
+    : mode === 'characters' ? (!classifier?.enabled ? '未启用' : classifyResult ? `${classifyResult.suggestions.length} 个建议待确认` : '按形象自动归类')
     : query ? `找到 ${items.length} 个`
     : inTrash ? (items.length ? `${items.length} 项 · 彻底删除后移到系统废纸篓` : '')
     : `${items.length} 个表情`;
@@ -462,12 +463,12 @@ export default function App() {
     <div className={`app${prefs.inspector ? ' with-inspector' : ''}`}>
       <Sidebar index={index} nav={nav} libraryName={libraryName(root)} dropTarget={dropTarget}
         onNav={navigate} onNewCollection={() => act.newCollection([])}
-        charactersEnabled={!!classifier?.enabled}
         onCollectionMenu={openCollectionMenu} onLibraryMenu={openLibraryMenu} />
 
       <main className="main">
         <Toolbar ref={searchRef} title={title} subtitle={subtitle} mode={mode} prefs={prefs} query={query}
           canEmptyTrash={index.counts.trash > 0} scanning={mode === 'characters' ? classifying : scanning}
+          rescanHidden={mode === 'characters' && !classifier?.enabled}
           onQuery={value => { setQuery(value); }} onPrefs={setPrefs}
           onSortMenu={openSortMenu} onImportMenu={anchor => setMenu(menuAt(anchor, importItems))}
           onEmptyTrash={() => act.deleteForever('all')} onRescan={() => void (mode === 'characters' ? runClassify() : runScan())} />
@@ -476,7 +477,8 @@ export default function App() {
 
         {nav.kind === 'characters' ? (
           <div className="similar-scroller">
-            <CharacterReview result={classifyResult} running={classifying} items={index.items} root={root} thumbVersion={thumbVersion}
+            <CharacterReview status={classifier} onStatus={status => { setClassifier(status); setClassifyResult(null); }}
+              result={classifyResult} running={classifying} items={index.items} root={root} thumbVersion={thumbVersion}
               onRun={() => void runClassify()}
               onAccept={async (character, accepted) => {
                 const ids = accepted.map(s => s.assetId);
@@ -516,7 +518,7 @@ export default function App() {
               }} />
           </div>
         ) : (
-          <StickerGrid items={items} root={root} index={index} view={prefs.view} tileSize={prefs.tileSize} thumbVersion={thumbVersion}
+          <StickerGrid items={items} root={root} index={index} view={prefs.view} tileSize={prefs.tileSize} thumbVersion={thumbVersion} animate={prefs.animate}
             selection={selection} resetKey={`${nav.kind}:${'value' in nav ? nav.value : ''}:${query}:${prefs.sort}`}
             onSelection={setSelection} onColumns={setColumns} onOpen={act.quickLook}
             onContextMenu={openGridMenu} onDragOut={ids => void dragOut(ids)}
@@ -624,7 +626,11 @@ export default function App() {
       ) : null}
 
       {dialog?.kind === 'settings' ? (
-        <SettingsDialog status={classifier} onStatus={status => { setClassifier(status); setClassifyResult(null); }} onClose={() => setDialog(null)} />
+        <SettingsDialog root={root} prefs={prefs} onPrefs={setPrefs} onClose={() => setDialog(null)}
+          onCacheCleared={kind => {
+            if (kind === 'recognition') setClassifyResult(null);
+            if (kind === 'thumbs' && root) api.ensureThumbnails(root).then(() => setThumbVersion(v => v + 1), () => undefined);
+          }} />
       ) : null}
 
       {dialog?.kind === 'import-wechat' && management ? (

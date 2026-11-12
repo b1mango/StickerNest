@@ -111,6 +111,21 @@ const handlers: Record<string, (args: Args) => unknown> = {
     items.splice(0, items.length, ...items.filter(i => !gone.has(i.id)));
     return { snapshot: snapshot(), management: update(m => { for (const id of gone) delete m.trash[id]; }), deleted: gone.size };
   },
+  ensure_thumbnails: () => ({ created: 0, skipped: items.length, failed: 0, total: items.length }),
+  classifier_status: () => (new URLSearchParams(location.search).has('nomodel')
+    ? { enabled: false, bytes: 0, characters: [], model: null }
+    : { enabled: true, bytes: 175876763, characters: ['草地牛', '奶蛙', '噜噜', 'chiikawa', '奶茶鼠', '小语k', '熊猫头', '奶龙', '龙图'], model: 'laion-clip-vit-b32' }),
+  classify_library: () => ({
+    characters: ['草地牛', '熊猫头', '龙图'],
+    suggestions: [
+      ...items.slice(0, 7).map((item, i) => ({ assetId: item.id, character: '熊猫头', score: 0.97 - i * 0.02, confident: i < 5, replaces: i < 3 ? '龙图' : undefined })),
+      ...items.slice(7, 11).map((item, i) => ({ assetId: item.id, character: '草地牛', score: 0.9 - i * 0.03, confident: i < 2 })),
+    ],
+  }),
+  cache_usage: () => ({ thumbs: 31_457_280, recognition: 1_331_200, downloads: 92_274_688 }),
+  douyin_browser_status: () => ({ exists: true, bytes: 48_234_496 }),
+  'plugin:app|version': () => '0.0.2',
+  'plugin:window|set_theme': () => undefined,
   'plugin:event|listen': () => 1,
   'plugin:event|unlisten': () => undefined,
   empty_trash: () => {
