@@ -11,22 +11,24 @@ A local-first macOS app for collecting, browsing, and organizing stickers.
 
 ## Features
 
-- Import from WeChat, Douyin, or local folders, archived by source; drop images or folders onto the window to import.
-- Press ⌘C or drag a sticker straight into a WeChat chat; Douyin WebP files are converted to WeChat-friendly GIF / PNG automatically.
+- Import from WeChat, Douyin, or local folders, archived by source; drop images or folders onto the window to import. PNG, JPEG, GIF, WebP and HEIC are supported.
+- One-click Douyin collection: a built-in dedicated browser reads your saved stickers, downloads the originals, and imports them after a one-time QR login.
+- Press ⌘C or drag a sticker straight into a WeChat chat; WebP files are converted to WeChat-friendly GIF / PNG automatically.
 - Grid and list views, name search, favorites, recently used, and Space for Quick Look.
 - Organize with collections and batch rename; right-click or drag onto a sidebar collection to file stickers.
+- Character recognition (optional): recognizes characters such as 草地牛, 奶蛙, chiikawa, 熊猫头 and 龙图 on device and files them into matching collections after you confirm.
 - Review similar stickers and choose which to keep; restore items from Trash.
-- Export selected originals, back up and restore libraries; follows the system light / dark appearance.
+- Export selected originals, back up and restore libraries; follow the system appearance or pick light / dark.
 
 ## Installation
 
-Download the [Apple Silicon DMG](https://github.com/b1mango/StickerNest/releases/download/v0.0.2/StickerNest_0.0.2_aarch64.dmg), open it, and drag StickerNest into Applications.
+Download the [Apple Silicon DMG](https://github.com/b1mango/StickerNest/releases/download/v0.1.0/StickerNest_0.1.0_aarch64.dmg), open it, and drag StickerNest into Applications.
 
-On first launch, create a new library, open an existing `StickerNest Library` folder, or restore a backup. The last library reopens automatically.
+On first launch, create a new library (an empty folder becomes the library itself), open an existing one, or restore a backup. The last library reopens automatically. Character recognition is off by default; enabling it from the sidebar downloads a model of about 176 MB.
 
 ## Development
 
-Requires Node.js 24.22.1, Rust, and macOS Command Line Tools. Prepare relocatable CPython 3.11 and Pillow 13.0.0 with uv (`uv run --python 3.11 --with pillow==13.0.0 python -c "import PIL"`), or set `STICKERNEST_PYTHON` to an equivalent environment. The build bundles local runtimes; installed apps do not require Node.js or Python.
+Requires Node.js 24.22.1 (see `.nvmrc`), Rust, and macOS Command Line Tools; when `npm run desktop:build` runs under another Node version, the build script downloads and verifies 24.22.1 automatically. Prepare relocatable CPython 3.11 and Pillow 13.0.0 with uv (`uv run --python 3.11 --with pillow==13.0.0 python -c "import PIL"`), or set `STICKERNEST_PYTHON` to an equivalent environment. The build bundles local runtimes; installed apps do not require Node.js or Python.
 
 ```sh
 npm ci
@@ -34,7 +36,7 @@ npm run desktop
 npm run desktop:build
 ```
 
-React + TypeScript provides the interface; Tauri + Rust handles local files, similarity scanning, and backups. UI code lives in `src/`, native logic in `src-tauri/src/`.
+React + TypeScript provides the interface; Tauri + Rust handles local files, similarity scanning, character recognition, and backups. UI code lives in `src/`, native logic in `src-tauri/src/`.
 
 ## License
 
