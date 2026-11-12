@@ -4,7 +4,9 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { Clock, FolderOpen, Images, Inbox, Library, MessageCircle, Music2, SearchX, Star, Trash2 } from 'lucide-react';
 import * as api from './api';
 import { ContextMenu, type ContextMenuItem } from './components/ContextMenu';
+import { CharacterReview } from './components/CharacterReview';
 import { CollectDialog } from './components/CollectDialog';
+import { SettingsDialog } from './components/SettingsDialog';
 import { EmptyState, Welcome } from './components/EmptyState';
 import { Inspector, type InspectorActions } from './components/Inspector';
 import { BatchRenameDialog, ConfirmDialog, PromptDialog } from './components/Modal';
@@ -32,7 +34,8 @@ type Dialog =
   | { kind: 'delete-forever'; ids: string[] | 'all' }
   | { kind: 'batch-rename'; ids: string[] }
   | { kind: 'collect-douyin' }
-  | { kind: 'import-wechat' };
+  | { kind: 'import-wechat' }
+  | { kind: 'settings' };
 
 interface Menu { x: number; y: number; items: ContextMenuItem[]; above?: boolean }
 
@@ -45,6 +48,7 @@ function navTitle(nav: Nav): string {
     case 'source': return nav.value === '本地' ? '本地导入' : nav.value;
     case 'collection': return nav.value;
     case 'similar': return '相似项';
+    case 'characters': return '形象识别';
     case 'trash': return '回收站';
   }
 }
@@ -226,6 +230,8 @@ export default function App() {
       { key: 'sep2', label: '' },
       { key: 'backup', label: '备份资料库…', onSelect: () => void lib.backup() },
       { key: 'restore', label: '从备份恢复…', onSelect: () => void lib.restoreBackup().then(ok => ok && navigate({ kind: 'all' })) },
+      { key: 'sep3', label: '' },
+      { key: 'settings', label: '设置…', onSelect: () => setDialog({ kind: 'settings' }) },
     ];
     setMenu(menuAt(anchor, items, true));
   }
@@ -323,7 +329,8 @@ export default function App() {
       const meta = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
       const ids = state.selectedIds;
-      const browsing = state.nav.kind !== 'similar';
+      if (meta && event.key === ',') { event.preventDefault(); setDialog({ kind: 'settings' }); return; }
+      const browsing = state.nav.kind !== 'similar' && state.nav.kind !== 'characters';
 
       if (meta && key === 'f') { event.preventDefault(); searchRef.current?.focus(); searchRef.current?.select(); return; }
       if (meta && key === 'i') { event.preventDefault(); setPrefs({ inspector: !prefsRef.current.inspector }); return; }
@@ -369,6 +376,35 @@ export default function App() {
     return () => { active = false; };
   }, [root, itemCount]);
 
+  // Character recognition is opt-in: the sidebar entry only appears once the model is installed.
+  const [classifier, setClassifier] = useState<api.ClassifierStatus | null>(null);
+  const [classifyResult, setClassifyResult] = useState<api.ClassifyResult | null>(null);
+  const [classifying, setClassifying] = useState(false);
+  useEffect(() => {
+    if (api.isDesktop) api.classifierStatus().then(setClassifier, () => setClassifier(null));
+  }, []);
+  useEffect(() => { setClassifyResult(null); }, [root]);
+  const runClassify = useCallback(async () => {
+    if (!root || classifying) return;
+    setClassifying(true);
+    try { setClassifyResult(await api.classifyLibrary(root)); }
+    catch (reason) { toast.push({ kind: 'error', title: '形象识别失败', detail: errorText(reason) }); }
+    finally { setClassifying(false); }
+  }, [root, classifying, toast]);
+  useEffect(() => {
+    if (nav.kind === 'characters' && !classifyResult && !classifying && classifier?.enabled) void runClassify();
+  }, [nav.kind]);
+  useEffect(() => {
+    if (nav.kind === 'characters' && classifier && !classifier.enabled) navigate({ kind: 'all' });
+  }, [classifier, nav.kind, navigate]);
+  function withoutSuggestions(character: string, ids: string[]) {
+    const gone = new Set(ids);
+    setClassifyResult(result => result && {
+      ...result,
+      suggestions: result.suggestions.filter(s => !(s.character === character && gone.has(s.assetId))),
+    });
+  }
+
   const [welcomeRecent, setWelcomeRecent] = useState<string[]>([]);
   useEffect(() => {
     if (!library && !lib.loading) api.recentLibraries().then(setWelcomeRecent, () => setWelcomeRecent([]));
@@ -411,8 +447,9 @@ export default function App() {
   };
 
   const title = navTitle(nav);
-  const mode = nav.kind === 'similar' ? 'similar' : inTrash ? 'trash' : 'browse';
+  const mode = nav.kind === 'similar' ? 'similar' : nav.kind === 'characters' ? 'characters' : inTrash ? 'trash' : 'browse';
   const subtitle = mode === 'similar' ? '找出重复与相似的表情'
+    : mode === 'characters' ? (classifyResult ? `${classifyResult.suggestions.length} 个建议待确认` : '按形象自动归类')
     : query ? `找到 ${items.length} 个`
     : inTrash ? (items.length ? `${items.length} 项 · 彻底删除后移到系统废纸篓` : '')
     : `${items.length} 个表情`;
@@ -425,18 +462,36 @@ export default function App() {
     <div className={`app${prefs.inspector ? ' with-inspector' : ''}`}>
       <Sidebar index={index} nav={nav} libraryName={libraryName(root)} dropTarget={dropTarget}
         onNav={navigate} onNewCollection={() => act.newCollection([])}
+        charactersEnabled={!!classifier?.enabled}
         onCollectionMenu={openCollectionMenu} onLibraryMenu={openLibraryMenu} />
 
       <main className="main">
         <Toolbar ref={searchRef} title={title} subtitle={subtitle} mode={mode} prefs={prefs} query={query}
-          canEmptyTrash={index.counts.trash > 0} scanning={scanning}
+          canEmptyTrash={index.counts.trash > 0} scanning={mode === 'characters' ? classifying : scanning}
           onQuery={value => { setQuery(value); }} onPrefs={setPrefs}
           onSortMenu={openSortMenu} onImportMenu={anchor => setMenu(menuAt(anchor, importItems))}
-          onEmptyTrash={() => act.deleteForever('all')} onRescan={() => void runScan()} />
+          onEmptyTrash={() => act.deleteForever('all')} onRescan={() => void (mode === 'characters' ? runClassify() : runScan())} />
 
         {lib.managementError ? <p className="banner" role="alert">整理记录读取失败：{lib.managementError}。收藏、合集与回收站暂不可用。</p> : null}
 
-        {nav.kind === 'similar' ? (
+        {nav.kind === 'characters' ? (
+          <div className="similar-scroller">
+            <CharacterReview result={classifyResult} running={classifying} items={index.items} root={root} thumbVersion={thumbVersion}
+              onRun={() => void runClassify()}
+              onAccept={async (character, ids) => {
+                const exists = index.collections.some(([name]) => name === character);
+                lib.setManagement(await lib.write(rootPath => exists
+                  ? api.batchLabels(rootPath, ids, [], [], [character], [])
+                  : api.addCollection(rootPath, character, ids)));
+                withoutSuggestions(character, ids);
+                toast.push({ kind: 'success', title: `已加入「${character}」`, detail: `${ids.length} 个表情，之后会作为识别样例。` });
+              }}
+              onDismiss={async (character, ids) => {
+                await lib.write(rootPath => api.dismissSuggestions(rootPath, ids.map(assetId => ({ assetId, character }))));
+                withoutSuggestions(character, ids);
+              }} />
+          </div>
+        ) : nav.kind === 'similar' ? (
           <div className="similar-scroller">
             <SimilarReview report={scanReport} scanning={scanning} items={index.items} root={root}
               existingGroups={management?.groups ?? []}
@@ -462,7 +517,7 @@ export default function App() {
               onDouyin={() => setDialog({ kind: 'collect-douyin' })} />} />
         )}
 
-        {selectedIds.length > 1 && nav.kind !== 'similar' ? (
+        {selectedIds.length > 1 && nav.kind !== 'similar' && nav.kind !== 'characters' ? (
           <SelectionBar count={selectedIds.length} inTrash={inTrash}
             onCopy={() => act.copy(selectedIds)}
             onCollect={anchor => setMenu(menuAt(anchor, collectionItems(selectedIds), true))}
@@ -481,7 +536,7 @@ export default function App() {
       </main>
 
       {prefs.inspector ? (
-        <Inspector ids={nav.kind === 'similar' ? [] : selectedIds} index={index} management={management} root={root}
+        <Inspector ids={nav.kind === 'similar' || nav.kind === 'characters' ? [] : selectedIds} index={index} management={management} root={root}
           libraryName={libraryName(root)} inTrash={inTrash} focusToken={focusToken} actions={inspectorActions} />
       ) : null}
 
@@ -556,6 +611,10 @@ export default function App() {
         <CollectDialog root={root} accounts={management.accounts.filter(account => account.platform === '抖音')}
           onSnapshot={(snapshot, warning) => { lib.setLibrary(snapshot); if (warning) toast.push({ kind: 'error', title: '部分素材无法预览', detail: warning }); }}
           onManagement={lib.setManagement} onError={() => undefined} onClose={() => setDialog(null)} />
+      ) : null}
+
+      {dialog?.kind === 'settings' ? (
+        <SettingsDialog status={classifier} onStatus={status => { setClassifier(status); setClassifyResult(null); }} onClose={() => setDialog(null)} />
       ) : null}
 
       {dialog?.kind === 'import-wechat' && management ? (

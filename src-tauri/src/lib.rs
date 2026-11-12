@@ -1,11 +1,13 @@
 pub mod backup;
 pub mod bookmark;
+pub mod classify;
 pub mod collection_runtime;
 pub mod library;
 pub mod management;
 pub mod similar;
 pub mod sharing;
 pub mod thumbs;
+pub mod vision;
 mod native;
 mod preferences;
 pub mod wechat;
@@ -749,6 +751,117 @@ async fn empty_trash(app: tauri::AppHandle, expected_root: String) -> Result<lib
     }).await.map_err(|e| e.to_string())?
 }
 
+fn classifier_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("classifier"))
+}
+
+#[tauri::command]
+fn classifier_status(app: tauri::AppHandle) -> Result<classify::ClassifierStatus, String> {
+    // Read-only and size-checked, so it must not wait on a long download holding the lock
+    // (sync commands run on the main thread).
+    classify::status_at(&classifier_dir(&app)?)
+}
+
+#[tauri::command]
+async fn enable_classifier(app: tauri::AppHandle) -> Result<classify::ClassifierStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = classify::operation_lock().lock().map_err(|_| "形象识别忙，请稍后再试")?;
+        let directory = classifier_dir(&app)?;
+        let runtime = collection_runtime(&app)?;
+        classify::download_model(&runtime, &directory, |progress| {
+            app.emit("classifier-progress", progress).map_err(|e| e.to_string())
+        })?;
+        vision::clear_model_cache()?;
+        let status = classify::status_at(&directory)?;
+        if !status.enabled {
+            return Err("模型下载完成但文件校验状态无效，请重试".into());
+        }
+        Ok(status)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn disable_classifier(app: tauri::AppHandle) -> Result<(), String> {
+    let _operation = classify::operation_lock().lock().map_err(|_| "形象识别忙，请稍后再试")?;
+    vision::clear_model_cache()?;
+    match std::fs::remove_dir_all(classifier_dir(&app)?) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("无法删除形象识别模型：{error}")),
+    }
+}
+
+#[derive(Clone, Serialize)]
+struct ClassifyProgress {
+    done: usize,
+    total: usize,
+}
+
+#[tauri::command]
+async fn classify_library(
+    app: tauri::AppHandle,
+    expected_root: String,
+) -> Result<classify::ClassifyResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = classify::operation_lock().lock().map_err(|_| "形象识别忙，请稍后再试")?;
+        let directory = classifier_dir(&app)?;
+        let status = classify::status_at(&directory)?;
+        if !status.enabled {
+            return Err("请先在设置中启用形象识别".into());
+        }
+        let model = status.model.ok_or("模型清单缺少型号")?;
+        let pack = classify::CharacterPack::from_json(
+            &std::fs::read(directory.join("characters.json")).map_err(|e| e.to_string())?,
+        )?;
+        let (root, items, management) = {
+            let state = app.state::<LibraryState>();
+            let current = state.0.lock().map_err(|_| "资料库忙，请稍后再试")?;
+            let library = current.as_ref().ok_or("请先打开资料库")?;
+            library.check_expected_root(&expected_root)?;
+            let snapshot = library.snapshot();
+            let root = PathBuf::from(&snapshot.root);
+            let items = snapshot.items.iter().map(|item| {
+                let original = library.asset_path(&item.id)?;
+                let thumbnail = thumbs::thumbs_dir(&root).join(format!("{}.png", item.id));
+                let input = if thumbnail.is_file() { thumbnail } else { original };
+                Ok((item.id.clone(), input))
+            }).collect::<Result<Vec<_>, String>>()?;
+            let management = library.get_management()?;
+            (root, items, management)
+        };
+        let embeddings = vision::with_cached_model(&directory.join("vision.safetensors"), |vision_model| {
+            classify::update_embeddings(&root, &model, &items, |paths| {
+                vision_model.embed_paths(paths)
+            }, |done, total| {
+                let _ = app.emit("classify-progress", ClassifyProgress { done, total });
+            })
+        })?;
+        let dismissed = classify::load_dismissed(&root)?;
+        let suggestions = classify::score_embeddings(&pack, &embeddings, &management, &dismissed);
+        Ok(classify::ClassifyResponse { characters: pack.names(), suggestions })
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn dismiss_suggestions(
+    app: tauri::AppHandle,
+    expected_root: String,
+    pairs: Vec<classify::DismissPair>,
+) -> Result<(), String> {
+    let _operation = classify::operation_lock().lock().map_err(|_| "形象识别忙，请稍后再试")?;
+    let state = app.state::<LibraryState>();
+    let current = state.0.lock().map_err(|_| "资料库忙")?;
+    let library = current.as_ref().ok_or("请先打开资料库")?;
+    library.check_expected_root(&expected_root)?;
+    for pair in &pairs {
+        library.asset_path(&pair.asset_id)?;
+        if !(1..=50).contains(&pair.character.chars().count()) {
+            return Err("形象名称须为 1–50 字".into());
+        }
+    }
+    classify::append_dismissed(Path::new(&library.snapshot().root), pairs)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -804,7 +917,12 @@ pub fn run() {
             wechat_detect_accounts,
             wechat_check_running,
             wechat_dump_and_export,
-            wechat_grant_bookmark
+            wechat_grant_bookmark,
+            classifier_status,
+            enable_classifier,
+            disable_classifier,
+            classify_library,
+            dismiss_suggestions
         ])
         .run(tauri::generate_context!())
         .expect("无法启动拾趣桌面应用");

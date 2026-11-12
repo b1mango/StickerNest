@@ -5,7 +5,7 @@ import { TILE_MAX, TILE_MIN, type Prefs } from '../hooks/usePrefs';
 export const Toolbar = forwardRef<HTMLInputElement, {
   title: string;
   subtitle: string;
-  mode: 'browse' | 'trash' | 'similar';
+  mode: 'browse' | 'trash' | 'similar' | 'characters';
   prefs: Prefs;
   query: string;
   canEmptyTrash: boolean;
@@ -25,9 +25,10 @@ export const Toolbar = forwardRef<HTMLInputElement, {
       </div>
 
       <div className="toolbar-tools">
-        {mode === 'similar' ? (
+        {mode === 'similar' || mode === 'characters' ? (
           <button className="btn" disabled={scanning} onClick={onRescan}>
-            <RefreshCw size={14} className={scanning ? 'spin' : undefined} />{scanning ? '正在扫描…' : '重新扫描'}
+            <RefreshCw size={14} className={scanning ? 'spin' : undefined} />
+            {mode === 'characters' ? (scanning ? '正在识别…' : '重新识别') : (scanning ? '正在扫描…' : '重新扫描')}
           </button>
         ) : <>
           {prefs.view === 'grid' ? (

@@ -8,6 +8,7 @@ export type Nav =
   | { kind: 'source'; value: string }
   | { kind: 'collection'; value: string }
   | { kind: 'similar' }
+  | { kind: 'characters' }
   | { kind: 'trash' };
 
 export type SortKey = 'newest' | 'oldest' | 'name' | 'size';
@@ -79,7 +80,7 @@ export function buildIndex(library: Snapshot | null, management: ManagementSnaps
 }
 
 export function filterItems(index: LibraryIndex, nav: Nav, query: string, sort: SortKey): Sticker[] {
-  if (nav.kind === 'similar') return [];
+  if (nav.kind === 'similar' || nav.kind === 'characters') return [];
   const search = query.trim().toLocaleLowerCase();
   const list = index.items.filter(item => {
     if (nav.kind === 'trash') {

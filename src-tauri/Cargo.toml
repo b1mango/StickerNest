@@ -12,6 +12,10 @@ tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-drag = "2.1.1"
 base64 = "0.22"
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
+half = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -29,6 +33,7 @@ name = "stickernest_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "0.11", features = ["accelerate"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSString", "NSURL", "NSFileManager", "NSError"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem", "NSWorkspace"] }

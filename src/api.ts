@@ -239,3 +239,31 @@ export async function wechatGrantBookmark(): Promise<string> {
   if (!path || typeof path !== 'string') throw new Error('未选择目录');
   return invoke<string>('wechat_grant_bookmark', { path });
 }
+
+// ---- Character recognition (opt-in; model downloaded on enable) ----
+
+export type ClassifierStatus = { enabled: boolean; bytes: number; characters: string[]; model: string | null };
+export type CharacterSuggestion = { assetId: string; character: string; score: number; confident: boolean };
+export type ClassifyResult = { characters: string[]; suggestions: CharacterSuggestion[] };
+/** Payload of `classifier-progress` (model download) and `classify-progress` (library analysis). */
+export type CountProgress = { stage?: string; message?: string; done: number; total: number };
+
+export function classifierStatus(): Promise<ClassifierStatus> {
+  return invoke('classifier_status');
+}
+
+export function enableClassifier(): Promise<ClassifierStatus> {
+  return invoke('enable_classifier');
+}
+
+export function disableClassifier(): Promise<void> {
+  return invoke('disable_classifier');
+}
+
+export function classifyLibrary(expectedRoot: string): Promise<ClassifyResult> {
+  return invoke('classify_library', { expectedRoot });
+}
+
+export function dismissSuggestions(expectedRoot: string, pairs: { assetId: string; character: string }[]): Promise<void> {
+  return invoke('dismiss_suggestions', { expectedRoot, pairs });
+}

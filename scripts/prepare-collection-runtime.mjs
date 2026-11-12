@@ -56,7 +56,7 @@ cpSync(python.distribution, join(packages, python.distribution.split('/').at(-1)
 for (const entry of readdirSync(dirname(python.pillow))) {
   if (entry.toLowerCase() === 'pillow.libs') cpSync(join(dirname(python.pillow), entry), join(packages, entry), { recursive: true, dereference: true });
 }
-for (const script of ['collect_douyin.mjs', 'download_douyin.py', 'download_wechat.py']) {
+for (const script of ['collect_douyin.mjs', 'download_douyin.py', 'download_wechat.py', 'download_model.py']) {
   cpSync(join(root, 'scripts', script), join(target, 'scripts', script));
 }
 cpSync(join(root, 'node_modules/ws'), join(target, 'scripts/node_modules/ws'), { recursive: true, dereference: true });

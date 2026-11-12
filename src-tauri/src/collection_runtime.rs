@@ -12,6 +12,7 @@ impl CollectionRuntime {
             "python/bin/python3",
             "scripts/collect_douyin.mjs",
             "scripts/download_douyin.py",
+            "scripts/download_model.py",
             "scripts/download_wechat.py",
         ] {
             if !root.join(file).is_file() {
