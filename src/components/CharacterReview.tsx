@@ -28,7 +28,7 @@ export function CharacterReview({ result, running, items, root, thumbVersion, on
   root: string;
   thumbVersion: number;
   onRun: () => void;
-  onAccept: (character: string, ids: string[]) => Promise<void>;
+  onAccept: (character: string, accepted: CharacterSuggestion[]) => Promise<void>;
   onDismiss: (character: string, ids: string[]) => Promise<void>;
 }) {
   const [progress, setProgress] = useState<CountProgress | null>(null);
@@ -97,18 +97,20 @@ export function CharacterReview({ result, running, items, root, thumbVersion, on
   return <section className="similar-page" aria-label="形象识别">
     {error ? <p className="field-error" role="alert">{error}</p> : null}
     {groups.map(group => {
-      const selected = group.items.filter(s => checked.has(key(group.character, s.assetId))).map(s => s.assetId);
+      const selectedSuggestions = group.items.filter(s => checked.has(key(group.character, s.assetId)));
+      const selected = selectedSuggestions.map(s => s.assetId);
+      const moves = [...new Set(group.items.flatMap(s => s.replaces ? [s.replaces] : []))];
       const rest = group.items.filter(s => !checked.has(key(group.character, s.assetId))).map(s => s.assetId);
       return <div key={group.character} className="character-group">
         <div className="character-head">
-          <h2>{group.character}<span>{group.items.length} 个建议</span></h2>
+          <h2>{group.character}<span>{group.items.length} 个建议{moves.length ? `，含原在「${moves.join('」「')}」里的，确认后移过来` : ''}</span></h2>
           <div className="editor-actions">
             <button className="button secondary" disabled={!!busy || !rest.length}
               onClick={() => void act(`dismiss:${group.character}`, () => onDismiss(group.character, rest))}>
               {busy === `dismiss:${group.character}` ? '正在忽略…' : `忽略未勾选（${rest.length}）`}
             </button>
             <button className="button primary" disabled={!!busy || !selected.length}
-              onClick={() => void act(`accept:${group.character}`, () => onAccept(group.character, selected))}>
+              onClick={() => void act(`accept:${group.character}`, () => onAccept(group.character, selectedSuggestions))}>
               {busy === `accept:${group.character}` ? '正在加入…' : `加入「${group.character}」（${selected.length}）`}
             </button>
           </div>
@@ -119,13 +121,14 @@ export function CharacterReview({ result, running, items, root, thumbVersion, on
             if (!item) return null;
             const on = checked.has(key(group.character, suggestion.assetId));
             return <button key={suggestion.assetId} className={`character-tile${on ? ' on' : ''}`} aria-pressed={on}
-              title={`${item.name} · 相似度 ${suggestion.score.toFixed(2)}`}
+              title={`${item.name} · 相似度 ${suggestion.score.toFixed(2)}${suggestion.replaces ? ` · 将从「${suggestion.replaces}」移出` : ''}`}
               onClick={() => toggle(group.character, suggestion.assetId)}>
               <span className="character-thumb">
                 <StickerPreview key={thumbVersion} src={thumbUrl(root, item.id, thumbVersion)} fallback={imageUrl(root, item.fileName)} name={item.name} eager />
               </span>
               <span className="character-check">{on ? <Check size={12} /> : null}</span>
               <span className={`character-score${suggestion.confident ? ' strong' : ''}`}>{Math.round(suggestion.score * 100)}</span>
+              {suggestion.replaces ? <span className="character-move">移</span> : null}
             </button>;
           })}
         </div>

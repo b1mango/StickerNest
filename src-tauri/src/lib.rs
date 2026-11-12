@@ -18,6 +18,7 @@ use backup::BackupSummary;
 use library::{ImportReport, Library, LibrarySnapshot};
 use serde::Serialize;
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -751,6 +752,29 @@ async fn empty_trash(app: tauri::AppHandle, expected_root: String) -> Result<lib
     }).await.map_err(|e| e.to_string())?
 }
 
+/// Bundled Apple Vision OCR helper (tools/ocr-helper); tauri dev uses the project copy.
+fn ocr_helper(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let bundled = app.path().resource_dir().map_err(|e| e.to_string())?.join("ocr-helper");
+    if bundled.is_file() {
+        return Ok(bundled);
+    }
+    let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/ocr-helper/ocr-helper");
+    if cfg!(debug_assertions) && dev.is_file() { Ok(dev) } else { Err("应用缺少文字识别组件，请重新安装完整应用".into()) }
+}
+
+/// Runs the OCR helper on `paths`, returning recognized text in the same order.
+fn recognize_text(helper: &Path, paths: &[PathBuf]) -> Result<Vec<String>, String> {
+    let output = std::process::Command::new(helper).args(paths).output()
+        .map_err(|e| format!("无法运行文字识别：{e}"))?;
+    if !output.status.success() {
+        return Err(format!("文字识别失败：{}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    String::from_utf8_lossy(&output.stdout).lines().map(|line| {
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|e| format!("文字识别输出无效：{e}"))?;
+        Ok(value["text"].as_str().unwrap_or_default().to_string())
+    }).collect()
+}
+
 fn classifier_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("classifier"))
 }
@@ -813,21 +837,23 @@ async fn classify_library(
         let pack = classify::CharacterPack::from_json(
             &std::fs::read(directory.join("characters.json")).map_err(|e| e.to_string())?,
         )?;
-        let (root, items, management) = {
+        let (root, items, originals, management) = {
             let state = app.state::<LibraryState>();
             let current = state.0.lock().map_err(|_| "资料库忙，请稍后再试")?;
             let library = current.as_ref().ok_or("请先打开资料库")?;
             library.check_expected_root(&expected_root)?;
             let snapshot = library.snapshot();
             let root = PathBuf::from(&snapshot.root);
+            let mut originals = Vec::with_capacity(snapshot.items.len());
             let items = snapshot.items.iter().map(|item| {
                 let original = library.asset_path(&item.id)?;
+                originals.push((item.id.clone(), original.clone()));
                 let thumbnail = thumbs::thumbs_dir(&root).join(format!("{}.png", item.id));
                 let input = if thumbnail.is_file() { thumbnail } else { original };
                 Ok((item.id.clone(), input))
             }).collect::<Result<Vec<_>, String>>()?;
             let management = library.get_management()?;
-            (root, items, management)
+            (root, items, originals, management)
         };
         let embeddings = vision::with_cached_model(&directory.join("vision.safetensors"), |vision_model| {
             classify::update_embeddings(&root, &model, &items, |paths| {
@@ -836,8 +862,19 @@ async fn classify_library(
                 let _ = app.emit("classify-progress", ClassifyProgress { done, total });
             })
         })?;
+        // Text rules (e.g. 龙图 = 熊猫头 with 龙 in the caption) need on-device OCR, only
+        // for assets that look like a rule's base character; results are cached per asset.
+        let originals: BTreeMap<&str, &PathBuf> = originals.iter().map(|(id, path)| (id.as_str(), path)).collect();
+        let wanted: Vec<(String, PathBuf)> = classify::text_candidates(&pack, &embeddings, &management)
+            .into_iter()
+            .filter_map(|id| originals.get(id.as_str()).map(|path| (id.clone(), (*path).clone())))
+            .collect();
+        let texts = if wanted.is_empty() { classify::load_texts(&root) } else {
+            let helper = ocr_helper(&app)?;
+            classify::update_texts(&root, &wanted, |paths| recognize_text(&helper, paths))?
+        };
         let dismissed = classify::load_dismissed(&root)?;
-        let suggestions = classify::score_embeddings(&pack, &embeddings, &management, &dismissed);
+        let suggestions = classify::score_embeddings(&pack, &embeddings, &management, &dismissed, &texts);
         Ok(classify::ClassifyResponse { characters: pack.names(), suggestions })
     }).await.map_err(|e| e.to_string())?
 }

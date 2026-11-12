@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use stickernest_lib::{
-    classify::{Character, CharacterPack, Thresholds, BATCH_SIZE},
+    classify::{Character, CharacterPack, TextRule, Thresholds, BATCH_SIZE},
     vision::VisionModel,
 };
 use std::{ffi::OsStr, path::PathBuf};
@@ -49,6 +49,8 @@ fn arguments() -> Result<Arguments, String> {
 struct Spec {
     thresholds: Option<Thresholds>,
     characters: Vec<SpecCharacter>,
+    #[serde(default)]
+    text_rules: Vec<TextRule>,
 }
 
 #[derive(Deserialize)]
@@ -90,7 +92,7 @@ fn run() -> Result<(), String> {
         let samples = embed_paths(&model, &character.images)?;
         characters.push(Character { name: character.name, samples, thresholds: character.thresholds });
     }
-    let pack = CharacterPack::new(spec.thresholds.unwrap_or_default(), characters)?;
+    let pack = CharacterPack::new(spec.thresholds.unwrap_or_default(), characters)?.with_text_rules(spec.text_rules)?;
     std::fs::write(&out, pack.to_json()?)
         .map_err(|e| format!("无法写入形象包 {}：{e}", out.display()))?;
     Ok(())

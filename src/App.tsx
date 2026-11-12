@@ -478,13 +478,23 @@ export default function App() {
           <div className="similar-scroller">
             <CharacterReview result={classifyResult} running={classifying} items={index.items} root={root} thumbVersion={thumbVersion}
               onRun={() => void runClassify()}
-              onAccept={async (character, ids) => {
-                const exists = index.collections.some(([name]) => name === character);
-                lib.setManagement(await lib.write(rootPath => exists
-                  ? api.batchLabels(rootPath, ids, [], [], [character], [])
-                  : api.addCollection(rootPath, character, ids)));
+              onAccept={async (character, accepted) => {
+                const ids = accepted.map(s => s.assetId);
+                const exists = (management?.collections ?? []).includes(character) || index.collections.some(([name]) => name === character);
+                const moves = new Map<string, string[]>();
+                for (const s of accepted) if (s.replaces) moves.set(s.replaces, [...(moves.get(s.replaces) ?? []), s.assetId]);
+                lib.setManagement(await lib.write(async rootPath => {
+                  let next = exists
+                    ? await api.batchLabels(rootPath, ids, [], [], [character], [])
+                    : await api.addCollection(rootPath, character, ids);
+                  // Misfiled look-alikes (e.g. plain 熊猫头 under 龙图) leave their old collection.
+                  for (const [from, moved] of moves) next = await api.batchLabels(rootPath, moved, [], [], [], [from]);
+                  return next;
+                }));
                 withoutSuggestions(character, ids);
-                toast.push({ kind: 'success', title: `已加入「${character}」`, detail: `${ids.length} 个表情，之后会作为识别样例。` });
+                const moved = [...moves.values()].reduce((n, list) => n + list.length, 0);
+                toast.push({ kind: 'success', title: `已加入「${character}」`,
+                  detail: `${ids.length} 个表情${moved ? `（其中 ${moved} 个从「${[...moves.keys()].join('」「')}」移出）` : ''}，之后会作为识别样例。` });
               }}
               onDismiss={async (character, ids) => {
                 await lib.write(rootPath => api.dismissSuggestions(rootPath, ids.map(assetId => ({ assetId, character }))));

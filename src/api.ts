@@ -243,7 +243,8 @@ export async function wechatGrantBookmark(): Promise<string> {
 // ---- Character recognition (opt-in; model downloaded on enable) ----
 
 export type ClassifierStatus = { enabled: boolean; bytes: number; characters: string[]; model: string | null };
-export type CharacterSuggestion = { assetId: string; character: string; score: number; confident: boolean };
+/** `replaces`: a look-alike collection the asset is misfiled in (e.g. 龙图 for a plain 熊猫头); accepting moves it out. */
+export type CharacterSuggestion = { assetId: string; character: string; score: number; confident: boolean; replaces?: string };
 export type ClassifyResult = { characters: string[]; suggestions: CharacterSuggestion[] };
 /** Payload of `classifier-progress` (model download) and `classify-progress` (library analysis). */
 export type CountProgress = { stage?: string; message?: string; done: number; total: number };

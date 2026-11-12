@@ -42,7 +42,8 @@
     "resources": {
       "../tools/wechat-key-dumper/wechat-key-dumper.dylib": "wechat-key-dumper.dylib",
       "../tools/bookmark-helper/bookmark-helper.dylib": "bookmark-helper.dylib",
-      "../output/collection-runtime/": "collection-runtime/"
+      "../output/collection-runtime/": "collection-runtime/",
+      "../tools/ocr-helper/ocr-helper": "ocr-helper"
     },
     "macOS": {
       "entitlements": "entitlements.plist",

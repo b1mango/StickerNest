@@ -66,10 +66,21 @@ fn thresholds_valid(t: &Thresholds) -> bool {
         && (-1.0..=1.0).contains(&t.low) && (-1.0..=1.0).contains(&t.high) && t.low <= t.high
 }
 
+/// A character told apart from its image look-alike only by text in the picture,
+/// e.g. 龙图 = a 熊猫头 whose caption contains 龙.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TextRule {
+    pub name: String,
+    pub from: String,
+    pub contains: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CharacterPack {
     pub thresholds: Thresholds,
     pub characters: Vec<Character>,
+    pub text_rules: Vec<TextRule>,
 }
 
 #[derive(Deserialize)]
@@ -80,6 +91,8 @@ struct RawCharacterPack {
     dim: usize,
     thresholds: Option<Thresholds>,
     characters: Vec<RawCharacter>,
+    #[serde(default)]
+    text_rules: Vec<TextRule>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -99,6 +112,8 @@ struct OutputCharacterPack {
     dim: usize,
     thresholds: Thresholds,
     characters: Vec<RawCharacter>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    text_rules: Vec<TextRule>,
 }
 
 impl CharacterPack {
@@ -122,7 +137,25 @@ impl CharacterPack {
                 validate_vector(sample).map_err(|e| format!("形象“{}”样例无效：{e}", character.name))?;
             }
         }
-        Ok(Self { thresholds, characters })
+        Ok(Self { thresholds, characters, text_rules: Vec::new() })
+    }
+
+    pub fn with_text_rules(mut self, rules: Vec<TextRule>) -> Result<Self, String> {
+        let mut names: HashSet<&str> = self.characters.iter().map(|c| c.name.as_str()).collect();
+        for rule in &rules {
+            let len = rule.name.chars().count();
+            if !(1..=50).contains(&len) || !names.insert(&rule.name) {
+                return Err("文字规则名称须为 1–50 字且不能与形象重名".into());
+            }
+            if !self.characters.iter().any(|c| c.name == rule.from) {
+                return Err(format!("文字规则“{}”的来源形象不存在", rule.name));
+            }
+            if rule.contains.is_empty() || rule.contains.iter().any(|t| t.trim().is_empty() || t.chars().count() > 20) {
+                return Err(format!("文字规则“{}”的关键字无效", rule.name));
+            }
+        }
+        self.text_rules = rules;
+        Ok(self)
     }
 
     pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
@@ -146,7 +179,7 @@ impl CharacterPack {
             }
             characters.push(Character { name: character.name, samples, thresholds: character.thresholds });
         }
-        Self::new(raw.thresholds.unwrap_or_default(), characters)
+        Self::new(raw.thresholds.unwrap_or_default(), characters)?.with_text_rules(raw.text_rules)
     }
 
     pub fn to_json(&self) -> Result<Vec<u8>, String> {
@@ -166,11 +199,18 @@ impl CharacterPack {
             dim: DIMENSION,
             thresholds: self.thresholds,
             characters,
+            text_rules: self.text_rules.clone(),
         }).map_err(|e| e.to_string())
     }
 
     pub fn names(&self) -> Vec<String> {
-        self.characters.iter().map(|character| character.name.clone()).collect()
+        self.characters.iter().map(|character| character.name.clone())
+            .chain(self.text_rules.iter().map(|rule| rule.name.clone()))
+            .collect()
+    }
+
+    fn rules_from<'a>(&'a self, base: &'a str) -> impl Iterator<Item = &'a TextRule> + 'a {
+        self.text_rules.iter().filter(move |rule| rule.from == base)
     }
 }
 
@@ -415,6 +455,48 @@ fn read_dismissed(path: &Path) -> Result<BTreeSet<DismissPair>, String> {
     Ok(pairs.into_iter().collect())
 }
 
+/// Recognized picture text per asset: `<root>/cache/ocr.json`. Images never change
+/// under an id (content hash), so entries are computed once and kept.
+fn texts_path(root: &Path) -> PathBuf {
+    root.join("cache").join("ocr.json")
+}
+
+pub fn load_texts(root: &Path) -> BTreeMap<String, String> {
+    fs::read(texts_path(root)).ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Recognizes text for `wanted` ids missing from the cache, in batches, and saves.
+pub fn update_texts(
+    root: &Path,
+    wanted: &[(String, PathBuf)],
+    mut recognize: impl FnMut(&[PathBuf]) -> Result<Vec<String>, String>,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut texts = load_texts(root);
+    let missing: Vec<&(String, PathBuf)> = wanted.iter().filter(|(id, _)| !texts.contains_key(id)).collect();
+    if missing.is_empty() {
+        return Ok(texts);
+    }
+    for batch in missing.chunks(24) {
+        let paths: Vec<PathBuf> = batch.iter().map(|(_, path)| path.clone()).collect();
+        let found = recognize(&paths)?;
+        if found.len() != batch.len() {
+            return Err("文字识别结果数量不符".into());
+        }
+        for ((id, _), text) in batch.iter().zip(found) {
+            texts.insert(id.clone(), text);
+        }
+    }
+    let path = texts_path(root);
+    fs::create_dir_all(path.parent().ok_or("缓存路径无效")?).map_err(|e| e.to_string())?;
+    let mut temp = tempfile::NamedTempFile::new_in(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    std::io::Write::write_all(&mut temp, &serde_json::to_vec(&texts).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    temp.persist(&path).map_err(|e| e.error.to_string())?;
+    Ok(texts)
+}
+
 pub fn append_dismissed(root: &Path, pairs: Vec<DismissPair>) -> Result<(), String> {
     let cache = root.join("cache");
     fs::create_dir_all(&cache).map_err(|e| format!("无法创建分类缓存目录：{e}"))?;
@@ -440,6 +522,10 @@ pub struct Suggestion {
     pub character: String,
     pub score: f32,
     pub confident: bool,
+    /// A look-alike collection (rule base or sibling rule) the asset is in by mistake,
+    /// e.g. a plain 熊猫头 filed under 龙图; accepting moves it out of there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -453,7 +539,7 @@ fn character_score(
     asset_id: &str,
     vector: &[f32],
     character: &Character,
-    collection_name: &str,
+    collection_names: &[&str],
     embeddings: &BTreeMap<String, Vec<f32>>,
     management: &ManagementSnapshot,
 ) -> f32 {
@@ -462,7 +548,7 @@ fn character_score(
     for (member_id, member) in embeddings {
         if member_id != asset_id
             && management.metadata.get(member_id).is_some_and(|metadata| {
-                metadata.collections.iter().any(|name| name == collection_name)
+                metadata.collections.iter().any(|name| collection_names.contains(&name.as_str()))
             })
         {
             best = best.max(cosine(vector, member));
@@ -471,56 +557,97 @@ fn character_score(
     best
 }
 
+/// Image score against a character, counting members of its own collection and of
+/// collections of text rules derived from it (a 龙图 is still a 熊猫头 picture).
+fn image_score(
+    pack: &CharacterPack,
+    asset_id: &str,
+    vector: &[f32],
+    character: &Character,
+    embeddings: &BTreeMap<String, Vec<f32>>,
+    management: &ManagementSnapshot,
+) -> f32 {
+    let names: Vec<&str> = std::iter::once(character.name.as_str())
+        .chain(pack.rules_from(&character.name).map(|rule| rule.name.as_str()))
+        .collect();
+    character_score(asset_id, vector, character, &names, embeddings, management)
+}
+
+/// The name an asset gets for `character` once its recognized text is considered.
+fn effective_name<'a>(pack: &'a CharacterPack, character: &'a Character, text: Option<&String>) -> &'a str {
+    text.and_then(|text| pack.rules_from(&character.name)
+            .find(|rule| rule.contains.iter().any(|needle| text.contains(needle.as_str()))))
+        .map_or(character.name.as_str(), |rule| rule.name.as_str())
+}
+
+/// Assets whose best image match is a character with text rules; only these need OCR.
+pub fn text_candidates(
+    pack: &CharacterPack,
+    embeddings: &BTreeMap<String, Vec<f32>>,
+    management: &ManagementSnapshot,
+) -> Vec<String> {
+    if pack.text_rules.is_empty() {
+        return Vec::new();
+    }
+    embeddings.iter().filter(|(asset_id, _)| !management.trash.contains_key(*asset_id)).filter_map(|(asset_id, vector)| {
+        let (character, score) = pack.characters.iter()
+            .map(|character| (character, image_score(pack, asset_id, vector, character, embeddings, management)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))?;
+        let low = character.thresholds.unwrap_or(pack.thresholds).low;
+        (score >= low && pack.rules_from(&character.name).next().is_some()).then(|| asset_id.clone())
+    }).collect()
+}
+
 pub fn score_embeddings(
     pack: &CharacterPack,
     embeddings: &BTreeMap<String, Vec<f32>>,
     management: &ManagementSnapshot,
     dismissed: &BTreeSet<DismissPair>,
+    texts: &BTreeMap<String, String>,
 ) -> Vec<Suggestion> {
     let mut suggestions = Vec::new();
     for (asset_id, vector) in embeddings {
         if management.trash.contains_key(asset_id) {
             continue;
         }
-        let mut best: Option<(&Character, f32)> = None;
+        let mut best: Option<(&Character, &str, f32)> = None;
         for character in &pack.characters {
+            let name = effective_name(pack, character, texts.get(asset_id));
             if management.metadata.get(asset_id).is_some_and(|metadata| {
-                metadata.collections.iter().any(|name| name == &character.name)
+                metadata.collections.iter().any(|collection| collection == name)
             }) {
                 continue;
             }
             if dismissed.contains(&DismissPair {
                 asset_id: asset_id.clone(),
-                character: character.name.clone(),
+                character: name.to_string(),
             }) {
                 continue;
             }
-            let score = character_score(
-                asset_id,
-                vector,
-                character,
-                &character.name,
-                embeddings,
-                management,
-            );
+            let score = image_score(pack, asset_id, vector, character, embeddings, management);
             let replace = match best {
                 None => true,
-                Some((other, best_score)) => {
-                    score > best_score || (score == best_score && character.name < other.name)
-                }
+                Some((_, other, best_score)) => score > best_score || (score == best_score && name < other),
             };
             if replace {
-                best = Some((character, score));
+                best = Some((character, name, score));
             }
         }
-        if let Some((character, score)) = best {
+        if let Some((character, name, score)) = best {
             let thresholds = character.thresholds.unwrap_or(pack.thresholds);
             if score >= thresholds.low {
+                let replaces = std::iter::once(character.name.as_str())
+                    .chain(pack.rules_from(&character.name).map(|rule| rule.name.as_str()))
+                    .filter(|sibling| *sibling != name)
+                    .find(|sibling| management.metadata.get(asset_id)
+                        .is_some_and(|metadata| metadata.collections.iter().any(|c| c == sibling)))
+                    .map(str::to_string);
                 suggestions.push(Suggestion {
                     asset_id: asset_id.clone(),
-                    character: character.name.clone(),
+                    character: name.to_string(),
                     score,
                     confident: score >= thresholds.high,
+                    replaces,
                 });
             }
         }
@@ -636,6 +763,7 @@ mod tests {
 
     fn pack_with(samples: Vec<Vec<f32>>) -> CharacterPack {
         CharacterPack {
+            text_rules: Vec::new(),
             thresholds: Thresholds::default(),
             characters: vec![Character { name: "奶龙".into(), samples, thresholds: None }],
         }
@@ -643,6 +771,73 @@ mod tests {
 
     fn id(value: u64) -> String {
         format!("{value:064x}")
+    }
+
+    #[test]
+    fn text_rules_split_look_alikes_by_caption_and_share_samples() {
+        let panda = Character { name: "熊猫头".into(), samples: vec![vector(0), vector(0)], thresholds: None };
+        let rule = TextRule { name: "龙图".into(), from: "熊猫头".into(), contains: vec!["龙".into()] };
+        let pack = CharacterPack::new(Thresholds { high: 0.9, low: 0.5 }, vec![panda.clone()]).unwrap()
+            .with_text_rules(vec![rule.clone()]).unwrap();
+        assert_eq!(pack.names(), vec!["熊猫头".to_string(), "龙图".to_string()]);
+        let decoded = CharacterPack::from_json(&pack.to_json().unwrap()).unwrap();
+        assert_eq!(decoded.text_rules, vec![rule.clone()]);
+        // Rules must point at an existing character, not clash with names, and have keywords.
+        let base = CharacterPack::new(Thresholds::default(), vec![panda.clone()]).unwrap();
+        for bad in [
+            TextRule { from: "不存在".into(), ..rule.clone() },
+            TextRule { name: "熊猫头".into(), ..rule.clone() },
+            TextRule { contains: vec![" ".into()], ..rule.clone() },
+        ] {
+            assert!(base.clone().with_text_rules(vec![bad]).is_err());
+        }
+
+        let (dragon, plain, member, other) = (id(1), id(2), id(3), id(4));
+        let embeddings = BTreeMap::from([
+            (dragon.clone(), vector(0)), (plain.clone(), vector(0)),
+            (member.clone(), vector(0)), (other.clone(), vector(1)),
+        ]);
+        let mut management = ManagementSnapshot::default();
+        // An existing 熊猫头 member whose caption says 龙 should move on to 龙图.
+        management.metadata.insert(member.clone(), AssetMetadata { collections: vec!["熊猫头".into()], ..Default::default() });
+        let mut candidates = text_candidates(&pack, &embeddings, &management);
+        candidates.sort();
+        assert_eq!(candidates, vec![dragon.clone(), plain.clone(), member.clone()]);
+        let texts = BTreeMap::from([
+            (dragon.clone(), "哦！懂了！ 聪明龙".to_string()),
+            (plain.clone(), "老子早料到".to_string()),
+            (member.clone(), "龙颜大悦".to_string()),
+        ]);
+        let by = |list: &[Suggestion], asset: &str| list.iter().find(|s| s.asset_id == asset).map(|s| s.character.clone());
+        let suggestions = score_embeddings(&pack, &embeddings, &management, &BTreeSet::new(), &texts);
+        assert_eq!(by(&suggestions, &dragon).as_deref(), Some("龙图"));
+        assert_eq!(by(&suggestions, &plain).as_deref(), Some("熊猫头"));
+        assert_eq!(by(&suggestions, &member).as_deref(), Some("龙图"));
+        let moved = suggestions.iter().find(|s| s.asset_id == member).unwrap();
+        assert_eq!(moved.replaces.as_deref(), Some("熊猫头"), "misfiled member moves out of the look-alike");
+        assert!(suggestions.iter().filter(|s| s.asset_id != member).all(|s| s.replaces.is_none()));
+        assert_eq!(by(&suggestions, &other), None);
+        // Dismissing the derived name hides it; 龙图 members still count as panda samples.
+        let dismissed = BTreeSet::from([DismissPair { asset_id: dragon.clone(), character: "龙图".into() }]);
+        assert_eq!(by(&score_embeddings(&pack, &embeddings, &management, &dismissed, &texts), &dragon), None);
+        let only_member = CharacterPack { characters: vec![Character { samples: vec![vector(1), vector(1)], ..panda }], ..pack.clone() };
+        management.metadata.insert(dragon.clone(), AssetMetadata { collections: vec!["龙图".into()], ..Default::default() });
+        let suggestions = score_embeddings(&only_member, &embeddings, &management, &BTreeSet::new(), &texts);
+        assert_eq!(by(&suggestions, &plain).as_deref(), Some("熊猫头"), "龙图 members act as 熊猫头 samples");
+    }
+
+    #[test]
+    fn recognized_text_is_cached_and_only_missing_ids_are_recognized() {
+        let dir = tempfile::tempdir().unwrap();
+        let wanted = vec![(id(1), PathBuf::from("/a.png")), (id(2), PathBuf::from("/b.png"))];
+        let mut calls = Vec::new();
+        let texts = update_texts(dir.path(), &wanted, |paths| { calls.push(paths.len()); Ok(paths.iter().map(|p| p.display().to_string()).collect()) }).unwrap();
+        assert_eq!(texts[&id(2)], "/b.png");
+        assert_eq!(load_texts(dir.path()), texts);
+        let more = vec![(id(2), PathBuf::from("/b.png")), (id(3), PathBuf::from("/c.png"))];
+        update_texts(dir.path(), &more, |paths| { calls.push(paths.len()); Ok(vec![String::new(); paths.len()]) }).unwrap();
+        assert_eq!(calls, vec![2, 1]);
+        assert!(update_texts(dir.path(), &[(id(4), PathBuf::from("/d.png"))], |_| Ok(vec![])).is_err());
     }
 
     #[test]
@@ -748,7 +943,7 @@ mod tests {
         management.metadata.insert(member.clone(), AssetMetadata {
             collections: vec!["奶龙".into()], ..Default::default()
         });
-        let suggestions = score_embeddings(&pack, &embeddings, &management, &BTreeSet::new());
+        let suggestions = score_embeddings(&pack, &embeddings, &management, &BTreeSet::new(), &BTreeMap::new());
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].asset_id, query);
         assert_eq!(suggestions[0].character, "奶龙");
@@ -756,7 +951,7 @@ mod tests {
         assert!(suggestions[0].confident);
 
         let self_only = BTreeMap::from([(query.clone(), vector(1))]);
-        let score = character_score(&query, &vector(1), &pack.characters[0], "奶龙", &self_only, &management);
+        let score = character_score(&query, &vector(1), &pack.characters[0], &["奶龙"], &self_only, &management);
         assert_eq!(score, 0.0);
     }
 
@@ -777,6 +972,7 @@ mod tests {
     #[test]
     fn scoring_honors_membership_dismissal_thresholds_trash_and_order() {
         let pack = CharacterPack {
+            text_rules: Vec::new(),
             thresholds: Thresholds { high: 0.86, low: 0.78 },
             characters: vec![
                 Character { name: "甲".into(), samples: vec![vector(0)], thresholds: None },
@@ -807,7 +1003,7 @@ mod tests {
         });
         management.trash.insert(trashed.clone(), 1);
         let dismissed = BTreeSet::from([DismissPair { asset_id: ignored.clone(), character: "甲".into() }]);
-        let suggestions = score_embeddings(&pack, &embeddings, &management, &dismissed);
+        let suggestions = score_embeddings(&pack, &embeddings, &management, &dismissed, &BTreeMap::new());
         assert_eq!(suggestions.iter().map(|s| s.asset_id.as_str()).collect::<Vec<_>>(), vec![&other, &confident, &tentative]);
         assert!(suggestions[1].confident);
         assert!(!suggestions[2].confident);
