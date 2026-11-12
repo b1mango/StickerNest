@@ -242,6 +242,41 @@ class NetworkTests(unittest.TestCase):
                 m.fetch(URL, opener)
         self.assertEqual(opener.calls, 3)
 
+    def test_stalled_mirror_falls_back_to_next_url_quickly(self):
+        sample = item()
+        sample['animate_url']['url_list'].append(URL.replace('p3-', 'p26-'))
+        calls = []
+        def fetcher(url):
+            calls.append(url)
+            if 'p3-' in url:
+                raise m.DownloadError('network_failure')
+            return gif()
+        with tempfile.TemporaryDirectory() as root:
+            row = m.collect([sample], root, fetcher)['items'][0]
+        self.assertEqual(row['status'], 'verified')
+        self.assertEqual(len(calls), 2)
+
+    def test_all_mirrors_get_a_second_pass(self):
+        calls = []
+        def fetcher(url):
+            calls.append(url)
+            if len(calls) == 1:
+                raise m.DownloadError('network_failure')
+            return gif()
+        with tempfile.TemporaryDirectory() as root:
+            row = m.collect([item()], root, fetcher)['items'][0]
+        self.assertEqual(row['status'], 'verified')
+        self.assertEqual(len(calls), 2)
+
+    def test_default_opener_bypasses_system_proxy(self):
+        with patch.object(m.urllib.request, 'build_opener', wraps=m.urllib.request.build_opener) as build:
+            with patch.object(m.urllib.request.OpenerDirector, 'open', side_effect=OSError('x')):
+                with patch.object(m.time, 'sleep'):
+                    with self.assertRaises(m.DownloadError):
+                        m.fetch(URL, attempts=1)
+        handlers = build.call_args.args
+        self.assertTrue(any(isinstance(h, m.urllib.request.ProxyHandler) and h.proxies == {} for h in handlers))
+
     def test_missing_original_can_be_recovered(self):
         with tempfile.TemporaryDirectory() as root:
             report = m.collect([item()], root, lambda url: gif())

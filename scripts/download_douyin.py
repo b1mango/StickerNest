@@ -54,14 +54,21 @@ class SameHostRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def fetch(url, opener=None):
+# A stalled CDN edge must not hold an item for minutes: short socket timeout and
+# per-attempt deadline, then the caller moves on to the next mirror.
+READ_TIMEOUT = 8
+ATTEMPT_DEADLINE = 20
+
+
+def fetch(url, opener=None, attempts=3):
     check_url(url)
-    opener = opener or urllib.request.build_opener(SameHostRedirect())
-    for attempt in range(3):
+    # Douyin CDNs are domestic: connect directly instead of via the system proxy.
+    opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}), SameHostRedirect())
+    for attempt in range(attempts):
         try:
             request = urllib.request.Request(url, headers={'User-Agent': 'StickerNest/0.1'})
             started = time.monotonic()
-            with opener.open(request, timeout=15) as response:
+            with opener.open(request, timeout=READ_TIMEOUT) as response:
                 check_url(response.geturl())
                 if urllib.parse.urlsplit(response.geturl()).hostname != check_url(url).hostname:
                     raise DownloadError('cross_host_redirect')
@@ -72,8 +79,8 @@ def fetch(url, opener=None):
                 chunks, size = [], 0
                 while True:
                     chunk = response.read(min(65536, MAX_BYTES + 1 - size))
-                    if time.monotonic() - started > 60:
-                        raise DownloadError('download_deadline')
+                    if time.monotonic() - started > ATTEMPT_DEADLINE:
+                        raise OSError('download_deadline')
                     if not chunk:
                         break
                     size += len(chunk)
@@ -88,12 +95,12 @@ def fetch(url, opener=None):
         except DownloadError:
             raise
         except urllib.error.HTTPError as exc:
-            if attempt < 2 and (exc.code == 429 or exc.code >= 500):
+            if attempt < attempts - 1 and (exc.code == 429 or exc.code >= 500):
                 time.sleep(attempt + 1)
                 continue
             raise DownloadError('http_' + str(exc.code)) from None
         except (OSError, ValueError, http.client.IncompleteRead):
-            if attempt < 2:
+            if attempt < attempts - 1:
                 time.sleep(attempt + 1)
                 continue
             raise DownloadError('network_failure') from None
@@ -179,7 +186,7 @@ def select_resource(item):
     raise DownloadError('no_resource_url')
 
 
-def collect(items, destination, fetcher=fetch):
+def collect(items, destination, fetcher=lambda url: fetch(url, attempts=1)):
     if not isinstance(items, list):
         raise DownloadError('invalid_list')
     ids = [item.get('id_str') if isinstance(item, dict) else None for item in items]
@@ -226,7 +233,9 @@ def _collect_item(item, originals, previous, fetcher):
                         'status': 'pending_inspection', 'inspection_error': str(exc)}
         else:
             data, info, resumed = None, None, False
-            for url in urls[:4]:
+            # Two passes over the mirrors, one attempt each: a hung edge costs one
+            # short attempt before the next mirror is tried.
+            for url in [*urls[:4], *urls[:4]]:
                 try:
                     check_url(url)
                     candidate = fetcher(url)
