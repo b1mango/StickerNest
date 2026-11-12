@@ -7,10 +7,11 @@ use crate::collection_runtime::CollectionRuntime;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     fs::{self, File},
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
+    process::Stdio,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -471,64 +472,126 @@ fn truncate_utf8(name: &str, max_bytes: usize) -> &str {
 pub struct CollectStageResult {
     pub stage: String,
     pub detail: String,
+    pub account: Option<DouyinAccount>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DouyinAccount {
+    pub uid: String,
+    pub nickname: String,
+}
+
+#[derive(Deserialize)]
+struct DouyinProgress {
+    stage: String,
+    message: String,
+}
+
+/// Stage 1 runs without holding the library lock; assets are imported in stage 2.
+pub fn collect_douyin_fetch(
+    root: &Path,
+    runtime: &CollectionRuntime,
+    profile: &Path,
+    mut on_progress: impl FnMut(String, String) -> Result<(), String>,
+) -> Result<CollectStageResult, String> {
+    let downloads = root.join("downloads");
+    fs::create_dir_all(&downloads).map_err(|e| format!("无法创建采集目录：{e}"))?;
+    let list_path = downloads.join("stickers.json");
+    let account_path = downloads.join("douyin-account.json");
+    let mut child = runtime.node()
+        .arg(runtime.script("collect_douyin.mjs"))
+        .arg("--out")
+        .arg(&list_path)
+        .arg("--profile")
+        .arg(profile)
+        .arg("--account-out")
+        .arg(&account_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("无法启动内置采集运行时：{e}"))?;
+    let mut stderr = BufReader::new(child.stderr.take().expect("采集进程的 stderr 已设置为管道"));
+    let mut errors = VecDeque::new();
+    let mut progress_error = None;
+    loop {
+        let mut line = String::new();
+        match stderr.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {},
+            Err(error) => {
+                // Closing the pipe lets the collector finish its own browser cleanup.
+                drop(stderr);
+                child.wait().map_err(|e| format!("等待采集进程失败：{e}"))?;
+                return Err(format!("读取采集进度失败：{error}"));
+            }
+        }
+        let line = line.trim_end_matches(['\r', '\n']);
+        if let Some(json) = line.strip_prefix("PROGRESS ") {
+            match serde_json::from_str::<DouyinProgress>(json) {
+                Ok(progress) => {
+                    if let Err(error) = on_progress(progress.stage, progress.message) {
+                        if progress_error.is_none() {
+                            progress_error = Some(error);
+                        }
+                    }
+                }
+                Err(error) => {
+                    progress_error.get_or_insert_with(|| format!("采集进度格式无效：{error}"));
+                }
+            }
+        } else {
+            if errors.len() == 8 {
+                errors.pop_front();
+            }
+            errors.push_back(line.chars().rev().take(600).collect::<String>().chars().rev().collect::<String>());
+        }
+    }
+    let status = child.wait().map_err(|e| format!("等待采集进程失败：{e}"))?;
+    if !status.success() {
+        let detail = errors.into_iter().collect::<Vec<_>>().join("\n");
+        let detail = detail.chars().rev().take(600).collect::<String>();
+        return Err(format!("收藏清单读取未完成：{}", detail.chars().rev().collect::<String>()));
+    }
+    if let Some(error) = progress_error {
+        return Err(format!("发送采集进度失败：{error}"));
+    }
+    let account: Option<DouyinAccount> = serde_json::from_slice(
+        &fs::read(&account_path).map_err(|e| format!("账号信息文件读取失败：{e}"))?,
+    ).map_err(|e| format!("账号信息文件无效：{e}"))?;
+    let stickers: Vec<serde_json::Value> =
+        serde_json::from_slice(&fs::read(&list_path).map_err(|e| format!("清单文件读取失败：{e}"))?)
+            .map_err(|e| format!("清单文件不是有效列表：{e}"))?;
+    if stickers.is_empty() {
+        return Err("收藏清单为空".into());
+    }
+    let output = runtime.python()
+        .arg(runtime.script("download_douyin.py"))
+        .arg(&list_path)
+        .arg(&downloads)
+        .output()
+        .map_err(|e| format!("无法启动内置下载运行时：{e}"))?;
+    if !output.status.success() {
+        // The downloader prints per-item and summary failures to stdout.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else if stdout.trim().is_empty() {
+            stderr.trim().to_string()
+        } else {
+            format!("{}\n{}", stderr.trim(), stdout.trim())
+        };
+        return Err(format!("资源下载未完成：{}", detail.chars().take(600).collect::<String>()));
+    }
+    Ok(CollectStageResult {
+        stage: "fetch".into(),
+        detail: format!("清单 {} 项，原件已下载到 downloads（中断可重试）", stickers.len()),
+        account,
+    })
 }
 
 impl Library {
-    /// Stage 1 of the in-app Douyin collection: run the local node collector
-    /// (Chrome DevTools) and the resumable python downloader. Everything lands
-    /// under downloads/ inside the library; assets are imported in stage 2.
-    pub fn collect_douyin_fetch(
-        &self,
-        runtime: &CollectionRuntime,
-        chrome_port: u16,
-    ) -> Result<CollectStageResult, String> {
-        let root = PathBuf::from(self.snapshot().root);
-        let downloads = root.join("downloads");
-        fs::create_dir_all(&downloads).map_err(|e| format!("无法创建采集目录：{e}"))?;
-        let list_path = downloads.join("stickers.json");
-        let output = runtime.node()
-            .arg(runtime.script("collect_douyin.mjs"))
-            .arg("--out")
-            .arg(&list_path)
-            .arg("--port")
-            .arg(chrome_port.to_string())
-            .output()
-            .map_err(|e| format!("无法启动内置采集运行时：{e}"))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("收藏清单读取未完成：{}", stderr.trim()));
-        }
-        let stickers: Vec<serde_json::Value> =
-            serde_json::from_slice(&fs::read(&list_path).map_err(|e| format!("清单文件读取失败：{e}"))?)
-                .map_err(|e| format!("清单文件不是有效列表：{e}"))?;
-        if stickers.is_empty() {
-            return Err("收藏清单为空".into());
-        }
-        let output = runtime.python()
-            .arg(runtime.script("download_douyin.py"))
-            .arg(&list_path)
-            .arg(&downloads)
-            .output()
-            .map_err(|e| format!("无法启动内置下载运行时：{e}"))?;
-        if !output.status.success() {
-            // The downloader prints per-item and summary failures to stdout.
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let detail = if stderr.trim().is_empty() {
-                stdout.trim().to_string()
-            } else if stdout.trim().is_empty() {
-                stderr.trim().to_string()
-            } else {
-                format!("{}\n{}", stderr.trim(), stdout.trim())
-            };
-            return Err(format!("资源下载未完成：{}", detail.chars().take(600).collect::<String>()));
-        }
-        Ok(CollectStageResult {
-            stage: "fetch".into(),
-            detail: format!("清单 {} 项，原件已下载到 downloads（中断可重试）", stickers.len()),
-        })
-    }
-
     /// Stage 1 of WeChat manifest download: plain URL list from wxemoticon,
     /// staged under downloads/wechat/ so it never collides with Douyin data.
     pub fn import_wechat_manifest(
@@ -566,6 +629,7 @@ impl Library {
                 "清单 {} 项 · 下载成功 {} · 失败 {}（原件保存在库内 downloads/wechat)",
                 summary["total"], summary["verified"], summary["failed"]
             ),
+            account: None,
         })
     }
 
@@ -861,15 +925,29 @@ mod tests {
     #[test]
     fn collect_pipeline_runs_collector_then_downloader() {
         use std::os::unix::fs::PermissionsExt;
-        // Shim "node" records the invocation and writes a two-sticker list.
-        let (dir, mut lib, _ids) = fixture();
+        // Shim "node" writes progress, a two-sticker list and account information.
+        let (dir, lib, _ids) = fixture();
         let root = PathBuf::from(lib.snapshot().root);
         let shim = dir.path().join("shim");
         fs::create_dir(&shim).unwrap();
         let node_shim = shim.join("node");
         fs::write(
             &node_shim,
-            "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--out\" ]; then out=\"$2\"; shift 2; continue; fi\n  shift\ndone\nprintf '[{\"id_str\":\"1\",\"animate_url\":{\"url_list\":[\"https://p3-im-emoticon-sign.byteimg.com/a.webp\"]}},{\"id_str\":\"2\",\"static_url\":{\"url_list\":[\"https://p3-im-emoticon-sign.byteimg.com/b.webp\"]}}]' > \"$out\"\necho found 2 >&2\n",
+            r##"#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --out) out="$2"; shift 2 ;;
+    --profile) profile="$2"; shift 2 ;;
+    --account-out) account="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$profile" ] || exit 1
+printf '%s\n' 'PROGRESS {"stage":"launching","message":"正在启动"}' >&2
+printf '[{"id_str":"1","animate_url":{"url_list":["https://p3-im-emoticon-sign.byteimg.com/a.webp"]}},{"id_str":"2","static_url":{"url_list":["https://p3-im-emoticon-sign.byteimg.com/b.webp"]}}]' > "$out"
+printf '{"uid":"123","nickname":"测试账号"}' > "$account"
+printf '%s\n' 'PROGRESS {"stage":"collecting","message":"已读取 2 项，共 2 项"}' >&2
+"##,
         )
         .unwrap();
         fs::create_dir_all(shim.join("python/bin")).unwrap();
@@ -894,11 +972,38 @@ mod tests {
         fs::create_dir(&scripts).unwrap();
         fs::write(scripts.join("collect_douyin.mjs"), "// shim\n").unwrap();
         fs::write(scripts.join("download_douyin.py"), "# shim\n").unwrap();
-        let result = lib.collect_douyin_fetch(&CollectionRuntime::fixture(&shim), 9222);
+        let runtime = CollectionRuntime::fixture(&shim);
+        let profile = dir.path().join("profile");
+        let mut progress = Vec::new();
+        let result = collect_douyin_fetch(&root, &runtime, &profile, |stage, message| {
+            progress.push((stage, message));
+            Ok(())
+        });
         let result = result.unwrap();
         assert_eq!(result.stage, "fetch");
         assert!(result.detail.contains("2 项"));
+        let account = result.account.unwrap();
+        assert_eq!(account.uid, "123");
+        assert_eq!(account.nickname, "测试账号");
+        assert_eq!(progress, vec![
+            ("launching".into(), "正在启动".into()),
+            ("collecting".into(), "已读取 2 项，共 2 项".into()),
+        ]);
         assert!(root.join("downloads/stickers.json").exists());
+
+        fs::write(&node_shim, r##"#!/bin/sh
+printf '%s\n' 'PROGRESS {"stage":"waiting-login","message":"等待登录"}' >&2
+printf '%s\n' '请求失败：网络不可用' >&2
+exit 1
+"##).unwrap();
+        let mut failure_progress = Vec::new();
+        let error = collect_douyin_fetch(&root, &runtime, &profile, |stage, message| {
+            failure_progress.push((stage, message));
+            Ok(())
+        }).unwrap_err();
+        assert_eq!(failure_progress, vec![("waiting-login".into(), "等待登录".into())]);
+        assert!(error.contains("请求失败：网络不可用"));
+        assert!(!error.contains("PROGRESS"));
     }
     #[test]
     fn wechat_manifest_downloads_and_imports_with_account_mapping() {

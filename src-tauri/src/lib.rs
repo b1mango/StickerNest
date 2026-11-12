@@ -18,7 +18,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
 };
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 #[derive(Default)]
 struct LibraryState(Mutex<Option<Library>>);
@@ -355,21 +355,29 @@ fn ignore_pair(
         .ignore_pair(&expected_root, &asset_a, &asset_b)
 }
 #[tauri::command]
-async fn collect_douyin_fetch(
-    app: tauri::AppHandle,
-    chrome_port: Option<u16>,
-) -> Result<backup::CollectStageResult, String> {
+async fn collect_douyin_fetch(app: tauri::AppHandle) -> Result<backup::CollectStageResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<LibraryState>();
-        let current = state.0.lock().map_err(|_| "资料库忙，请稍后再试")?;
+        let root = {
+            let state = app.state::<LibraryState>();
+            let current = state.0.lock().map_err(|_| "资料库忙，请稍后再试")?;
+            PathBuf::from(current.as_ref().ok_or("请先打开资料库")?.snapshot().root)
+        };
         let runtime = collection_runtime(&app)?;
-        current
-            .as_ref()
-            .ok_or("请先打开资料库")?
-            .collect_douyin_fetch(&runtime, chrome_port.unwrap_or(9222))
+        let profile = app.path().app_data_dir().map_err(|e| e.to_string())?.join("douyin-browser");
+        std::fs::create_dir_all(&profile).map_err(|e| format!("无法创建专用浏览器目录：{e}"))?;
+        backup::collect_douyin_fetch(&root, &runtime, &profile, |stage, message| {
+            app.emit("douyin-progress", DouyinProgress { stage, message })
+                .map_err(|e| e.to_string())
+        })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[derive(Clone, Serialize)]
+struct DouyinProgress {
+    stage: String,
+    message: String,
 }
 
 #[tauri::command]

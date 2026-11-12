@@ -188,8 +188,11 @@ export function ignorePair(expectedRoot: string, assetA: string, assetB: string)
 
 // ---- Platform collection (Douyin / WeChat) ----
 
-export function collectDouyinFetch(chromePort?: number): Promise<{ stage: string; detail: string }> {
-  return invoke('collect_douyin_fetch', { chromePort: chromePort ?? null });
+export type DouyinAccount = { uid: string; nickname: string };
+
+/** Runs the managed-browser collector; progress arrives as `douyin-progress` events. */
+export function collectDouyinFetch(): Promise<{ stage: string; detail: string; account: DouyinAccount | null }> {
+  return invoke('collect_douyin_fetch');
 }
 
 export function collectDouyinImport(): Promise<ImportResult & { reportPath: string }> {
