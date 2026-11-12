@@ -95,6 +95,10 @@ export function useLibrary(toast: ToastApi) {
       if (snapshot) await applyLibrary(snapshot);
     }, create ? '资料库未能创建' : '资料库未能打开'),
 
+    openRecent: (path: string) => run('正在打开资料库', async () => {
+      await applyLibrary(await api.openLibraryPath(path));
+    }, '资料库未能打开'),
+
     restoreBackup: () => run('正在校验并恢复备份', async () => {
       const path = await api.restoreBackup();
       if (!path) return;

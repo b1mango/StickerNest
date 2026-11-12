@@ -41,6 +41,11 @@ export async function currentLibrary(): Promise<Snapshot | null> {
   return invoke<Snapshot | null>('current_library');
 }
 
+export async function recentLibraries(): Promise<string[]> {
+  if (!isDesktop) return [];
+  return invoke<string[]>('recent_libraries');
+}
+
 export function openLibraryPath(path: string): Promise<Snapshot> {
   return invoke<Snapshot>('select_library', { path, create: false });
 }
@@ -55,7 +60,7 @@ export function revealInFinder(expectedRoot: string, assetIds: string[]): Promis
 
 // ---- Import ----
 
-const IMAGE_FILTER = [{ name: '图片与动图', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }];
+const IMAGE_FILTER = [{ name: '图片与动图', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'heic', 'heif'] }];
 
 export async function pickImportPaths(folder: boolean): Promise<string[] | null> {
   const paths = await open(folder

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { ArchiveRestore, FolderOpen, FolderPlus } from 'lucide-react';
+import { ArchiveRestore, Clock, FolderOpen, FolderPlus } from 'lucide-react';
 
 export function EmptyState({ icon, title, children, actions }: { icon: ReactNode; title: string; children?: ReactNode; actions?: ReactNode }) {
   return (
@@ -13,7 +13,14 @@ export function EmptyState({ icon, title, children, actions }: { icon: ReactNode
 }
 
 /** First run, or the remembered library is gone. */
-export function Welcome({ busy, onCreate, onOpen, onRestore }: { busy: boolean; onCreate: () => void; onOpen: () => void; onRestore: () => void }) {
+export function Welcome({ busy, recent, onOpenRecent, onCreate, onOpen, onRestore }: {
+  busy: boolean;
+  recent: { path: string; name: string; place: string }[];
+  onOpenRecent: (path: string) => void;
+  onCreate: () => void;
+  onOpen: () => void;
+  onRestore: () => void;
+}) {
   return (
     <main className="welcome" data-window-drag-region>
       <div className="welcome-card">
@@ -21,6 +28,11 @@ export function Welcome({ busy, onCreate, onOpen, onRestore }: { busy: boolean; 
         <h1>拾趣</h1>
         <p>把微信、抖音里收藏的表情集中归档，随时挑出来再发到微信。</p>
         <div className="welcome-actions">
+          {recent.map(item => (
+            <button key={item.path} className="welcome-option" disabled={busy} onClick={() => onOpenRecent(item.path)} title={item.path}>
+              <Clock size={20} /><span><strong>{item.name}</strong><small>最近打开 · {item.place}</small></span>
+            </button>
+          ))}
           <button className="welcome-option" disabled={busy} onClick={onCreate}>
             <FolderPlus size={20} /><span><strong>新建资料库</strong><small>选择一个文件夹存放表情</small></span>
           </button>

@@ -53,6 +53,11 @@ function libraryName(root: string): string {
   return root.split('/').filter(Boolean).pop() ?? root;
 }
 
+/** Parent folder with the home directory shortened, e.g. "~/Pictures". */
+function libraryPlace(root: string): string {
+  return root.replace(/\/[^/]+\/?$/, '').replace(/^\/Users\/[^/]+/, '~') || '/';
+}
+
 /** Menus that open from a button sit below it; ones near the bottom open upward (their bottom edge at `y`). */
 function menuAt(anchor: DOMRect, items: ContextMenuItem[], above = false): Menu {
   return { x: anchor.left, y: above ? anchor.top - 4 : anchor.bottom + 4, items, above };
@@ -208,10 +213,14 @@ export default function App() {
     ] });
   }
 
-  function openLibraryMenu(anchor: DOMRect) {
+  async function openLibraryMenu(anchor: DOMRect) {
+    const recent = (await api.recentLibraries().catch(() => [] as string[])).filter(path => path !== lib.library?.root);
     const items: ContextMenuItem[] = [
       { key: 'reveal', label: '在访达中显示资料库', onSelect: () => lib.reveal([]) },
       { key: 'sep1', label: '' },
+      ...recent.map(path => ({ key: `recent:${path}`, label: `${libraryName(path)} · ${libraryPlace(path)}`,
+        onSelect: () => void lib.openRecent(path).then(ok => ok && navigate({ kind: 'all' })) })),
+      ...(recent.length ? [{ key: 'sep0', label: '' }] : []),
       { key: 'open', label: '打开其他资料库…', onSelect: () => void lib.openLibrary(false).then(ok => ok && navigate({ kind: 'all' })) },
       { key: 'create', label: '新建资料库…', onSelect: () => void lib.openLibrary(true).then(ok => ok && navigate({ kind: 'all' })) },
       { key: 'sep2', label: '' },
@@ -348,13 +357,20 @@ export default function App() {
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
 
+  const [welcomeRecent, setWelcomeRecent] = useState<string[]>([]);
+  useEffect(() => {
+    if (!library && !lib.loading) api.recentLibraries().then(setWelcomeRecent, () => setWelcomeRecent([]));
+  }, [library, lib.loading]);
+
   // ---- Render ----
 
   if (lib.loading) return <div className="app-loading" data-window-drag-region />;
 
   if (!library) {
     return <>
-      <Welcome busy={!!lib.busy} onCreate={() => void lib.openLibrary(true)} onOpen={() => void lib.openLibrary(false)} onRestore={() => void lib.restoreBackup()} />
+      <Welcome busy={!!lib.busy} recent={welcomeRecent.map(path => ({ path, name: libraryName(path), place: libraryPlace(path) }))}
+        onOpenRecent={path => void lib.openRecent(path)}
+        onCreate={() => void lib.openLibrary(true)} onOpen={() => void lib.openLibrary(false)} onRestore={() => void lib.restoreBackup()} />
       <Toasts toasts={toast.toasts} onDismiss={toast.dismiss} />
     </>;
   }

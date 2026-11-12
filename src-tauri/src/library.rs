@@ -12,6 +12,8 @@ use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(target_os = "macos")]
+use std::process::Command;
 
 const MAX_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_DIMENSION: u32 = 4096;
@@ -117,6 +119,72 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+fn is_heif(bytes: &[u8]) -> bool {
+    if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
+        return false;
+    }
+    let size = u32::from_be_bytes(bytes[..4].try_into().unwrap());
+    let (header_size, box_size) = match size {
+        0 => (8, bytes.len()),
+        1 => {
+            if bytes.len() < 24 {
+                return false;
+            }
+            let size = u64::from_be_bytes(bytes[8..16].try_into().unwrap());
+            if size > bytes.len() as u64 {
+                return false;
+            }
+            (16, size as usize)
+        }
+        _ => (8, size as usize),
+    };
+    if box_size < header_size + 8
+        || box_size > bytes.len()
+        || (box_size - header_size - 8) % 4 != 0
+    {
+        return false;
+    }
+    std::iter::once(&bytes[header_size..header_size + 4])
+        .chain(bytes[header_size + 8..box_size].chunks_exact(4))
+        .any(|brand| {
+            matches!(
+                brand,
+                b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"hevm"
+                    | b"hevs" | b"mif1" | b"msf1"
+            )
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn convert_heif(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let temp = tempfile::tempdir().map_err(err)?;
+    let input = temp.path().join("input.heic");
+    let output = temp.path().join("converted.png");
+    fs::write(&input, bytes).map_err(err)?;
+    // Multi-frame HEIC sequences are imported as their primary image only.
+    let result = Command::new("/usr/bin/sips")
+        .args(["-s", "format", "png"])
+        .arg(&input)
+        .arg("--out")
+        .arg(&output)
+        .output()
+        .map_err(|e| format!("无法运行 sips 转换 HEIC：{e}"))?;
+    if !result.status.success() {
+        let stderr: String = String::from_utf8_lossy(&result.stderr)
+            .trim()
+            .chars()
+            .take(300)
+            .collect();
+        return Err(format!("HEIC 转换失败（{}）：{stderr}", result.status));
+    }
+    read_bounded(&output)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn convert_heif(_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    Err("HEIC 仅在 macOS 上支持导入".into())
+}
+
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -209,7 +277,7 @@ fn expand_import(path: &Path, out: &mut Vec<PathBuf>, failed: &mut Vec<ImportFai
         }
     } else if meta.is_file() {
         let ext = path.extension().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
-        if !recursive || matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") { out.push(path.to_path_buf()); }
+        if !recursive || matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "heif") { out.push(path.to_path_buf()); }
     }
     Ok(())
 }
@@ -437,6 +505,11 @@ impl Library {
     fn import_one(&mut self, path: &Path, name: &str, source: &str) -> Result<bool, String> {
         Self::check_assets(&self.root)?;
         let bytes = read_bounded(path)?;
+        let bytes = if is_heif(&bytes) {
+            convert_heif(&bytes)?
+        } else {
+            bytes
+        };
         let (format, width, height) = inspect(&bytes)?;
         let id = hash(&bytes);
         let mut next = Manifest {
@@ -663,6 +736,79 @@ pub(crate) mod tests {
         let bytes = encoded.into_inner();
         fs::write(path, &bytes).unwrap();
         bytes
+    }
+
+    #[test]
+    fn heif_detection_checks_ftyp_brands() {
+        for brand in [
+            b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"hevm", b"hevs",
+            b"mif1", b"msf1",
+        ] {
+            let mut major = b"\0\0\0\x10ftypabcd\0\0\0\0".to_vec();
+            major[8..12].copy_from_slice(brand);
+            assert!(is_heif(&major));
+
+            let mut compatible = b"\0\0\0\x14ftypabcd\0\0\0\0abcd".to_vec();
+            compatible[16..20].copy_from_slice(brand);
+            assert!(is_heif(&compatible));
+        }
+
+        assert!(!is_heif(b"\0\0\0\x10ftypabcdheic"));
+        assert!(!is_heif(b"\0\0\0\x10freeheic\0\0\0\0"));
+        assert!(!is_heif(b"\0\0\0\x18ftypheic\0\0\0\0"));
+        assert!(is_heif(b"\0\0\0\x01ftyp\0\0\0\0\0\0\0\x18heic\0\0\0\0"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn heic_import_converts_to_png_and_deduplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("fixture.png");
+        image::RgbImage::from_pixel(32, 32, image::Rgb([70, 120, 200]))
+            .save(&png)
+            .unwrap();
+        let input = dir.path().join("input");
+        let nested = input.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        let heic = nested.join("表情.HEIC");
+        let result = Command::new("/usr/bin/sips")
+            .args(["-s", "format", "heic"])
+            .arg(&png)
+            .arg("--out")
+            .arg(&heic)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        fs::write(input.join("broken.heic"), b"not an image").unwrap();
+
+        let mut library = Library::create(dir.path()).unwrap();
+        let report = library.import_files(vec![input], "本地".into()).unwrap();
+        assert_eq!((report.added, report.duplicates), (1, 0));
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].name, "broken.heic");
+        assert_eq!(report.failed[0].error, "无法识别图片内容");
+        let item = &library.snapshot().items[0];
+        assert_eq!(item.format, "png");
+        assert_eq!(item.name, "表情.HEIC");
+        let asset = fs::read(library.asset_path(&item.id).unwrap()).unwrap();
+        assert_eq!(image::guess_format(&asset).unwrap(), image::ImageFormat::Png);
+
+        let report = library.import_files(vec![heic.clone()], "本地".into()).unwrap();
+        assert_eq!((report.added, report.duplicates), (0, 1));
+        assert!(report.failed.is_empty());
+
+        let heif_folder = dir.path().join("heif_input");
+        fs::create_dir(&heif_folder).unwrap();
+        fs::copy(&heic, heif_folder.join("copy.HEIF")).unwrap();
+        let report = library.import_files(vec![heif_folder], "本地".into()).unwrap();
+        assert_eq!((report.added, report.duplicates), (0, 1));
+        assert!(report.failed.is_empty());
+
+        let misleading = dir.path().join("content.png");
+        fs::copy(heic, &misleading).unwrap();
+        let report = library.import_files(vec![misleading], "本地".into()).unwrap();
+        assert_eq!((report.added, report.duplicates), (0, 1));
+        assert!(report.failed.is_empty());
     }
 
     #[test]

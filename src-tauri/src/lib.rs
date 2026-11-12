@@ -96,6 +96,11 @@ fn inspect_library_folder(path: String) -> Result<FolderInfo, String> {
 }
 
 #[tauri::command]
+fn recent_libraries(app: tauri::AppHandle) -> Vec<String> {
+    app.path().app_config_dir().map(|config| preferences::recent(&config)).unwrap_or_default()
+}
+
+#[tauri::command]
 fn current_library(state: State<'_, LibraryState>) -> Result<Option<LibrarySnapshot>, String> {
     Ok(state
         .0
@@ -691,6 +696,7 @@ pub fn run() {
             mark_used,
             prepare_wechat,
             inspect_library_folder,
+            recent_libraries,
             copy_to_clipboard,
             asset_paths,
             drag_icon,
